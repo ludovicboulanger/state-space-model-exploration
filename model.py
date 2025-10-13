@@ -1,8 +1,6 @@
 from typing import List, Optional, Tuple
 
 from torch import (
-    allclose,
-    complex64,
     empty,
     Tensor,
     eye,
@@ -10,8 +8,6 @@ from torch import (
     zeros,
     stack,
     hstack,
-    real,
-    zeros_like,
 )
 from torch.fft import fft, ifft
 from torch.linalg import inv, matrix_power
