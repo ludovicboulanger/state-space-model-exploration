@@ -1,14 +1,15 @@
 from numpy import hanning
 from numpy.fft import fft, fftfreq, fftshift
-from torch import Tensor, zeros, rand, allclose
+from torch import Tensor, arange, complex64, exp, ones, pi, zeros, rand, allclose
 from matplotlib.pyplot import figure, show, subplots
 from scipy.signal import ShortTimeFFT
 
-from model import SSM
+from model import SSMLayer
 from speech_commands_dataset import SpeechCommandsDataset
 
 
-def plot_stft(input: Tensor, ssm_output: Tensor) -> None:
+def plot_stft(input: Tensor, ssm_output: Tensor, title: str) -> None:
+    freqs = ssm_output.shape[0]
     speech = input.detach().numpy().squeeze()
     fig = figure(figsize=(9, 8))
     gs = fig.add_gridspec(nrows=2, ncols=2)
@@ -17,12 +18,12 @@ def plot_stft(input: Tensor, ssm_output: Tensor) -> None:
     ax0.set_title("Speech Waveform")
     ax1 = fig.add_subplot(gs[1, 0])
     ax1.imshow(
-        abs(ssm_output.detach().numpy().squeeze()[:64]),
+        abs(ssm_output.detach().numpy().squeeze()[: freqs // 2]),
         aspect="auto",
         origin="lower",
         cmap="Blues",
     )
-    ax1.set_title("SSM Output")
+    ax1.set_title(title)
 
     ax2 = fig.add_subplot(gs[1, 1])
     stft = ShortTimeFFT(win=hanning(M=128), hop=1, scale_to="magnitude", fs=16000)
@@ -37,7 +38,7 @@ def plot_stft(input: Tensor, ssm_output: Tensor) -> None:
     fig.tight_layout()
 
 
-def plot_frequency_response(ssm: SSM) -> None:
+def plot_frequency_response(ssm: SSMLayer) -> None:
     impulse = zeros(size=(1, 1, 100))
     impulse[..., 0] = 1
     impulse_response = ssm(impulse).squeeze().detach().numpy()
@@ -52,29 +53,64 @@ def plot_frequency_response(ssm: SSM) -> None:
     fig.tight_layout()
 
 
-if __name__ == "__main__":
+def run_ssm_as_stft() -> None:
+    fft_size = 64
     dataset = SpeechCommandsDataset(root="./data")
-    model = SSM(
-        hidden_dim=8,
+
+    damp = 0.99
+    frequency_steps = arange(start=0, end=fft_size, step=1)
+    coefficients = damp * exp(-1j * 2 * pi * frequency_steps / fft_size)
+    A = coefficients.view(-1, 1, 1)
+    B = ones(size=(fft_size, 1, 1), dtype=complex64)
+    C = ones(size=(fft_size, 1, 1), dtype=complex64)
+
+    model = SSMLayer(
+        hidden_dim=1,
+        num_features=64,
         step=1 / 16000,
-        init="random",
+        A_init=A,
+        B_init=B,
+        C_init=C,
+        init_discrete=True,
+        accelerator="cpu",
+    )
+    x, _ = dataset[3221]
+    x = x.unsqueeze(dim=0)
+    model.training = False
+    rec_output = model(x)
+    plot_stft(x, rec_output.squeeze(), title="SSM Output (Recurrence)")
+    model.training = True
+    conv_output = model(x)
+    plot_stft(x, conv_output.squeeze(), title="SSM Output (Convolution)")
+    max_error = (rec_output - conv_output).abs().max()
+    relative_error = max_error / rec_output.abs().max()
+    print(f"Max error: {max_error}, Relative: {relative_error}")
+
+
+def compare_conv_versus_recurrent_view() -> None:
+    model = SSMLayer(
+        hidden_dim=1,
+        num_features=4,
+        step=1 / 16000,
         accelerator="cpu",
     )
 
     model.training = True
-    x = rand(size=(4, 1, 10))
-    conv_output = model(x)
-    print("Conv Output", conv_output)
+    x = rand(size=(4, 1, 5000))
+    from torch import real
+
+    conv_output = real(model(x))
+    print(conv_output)
     model.training = False
     rec_output = model(x)
-    print("Recurrent Output", rec_output)
+    print(rec_output)
 
-    print("Conv is about equal to recurrent : ", allclose(conv_output, rec_output))
+    max_error = (rec_output - conv_output).abs().max()
+    relative_error = max_error / rec_output.abs().max()
+    print(f"Max error: {max_error}, Relative: {relative_error}")
 
-    """
-    x, y = dataset[3221]
-    x = x.unsqueeze(dim=0)
-    output = model(x)
-    plot_stft(x, output)
-    """
+
+if __name__ == "__main__":
+    # compare_conv_versus_recurrent_view()
+    run_ssm_as_stft()
     show()
