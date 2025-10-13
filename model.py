@@ -11,9 +11,12 @@ from torch import (
     stack,
     ones_like,
     pi,
+    real,
 )
-from torch.linalg import inv
+from torch.fft import rfft, irfft
+from torch.linalg import inv, matrix_power
 from torch.nn import Module, Parameter
+from torch.nn.functional import pad
 from torch.nn.init import xavier_normal_
 
 
@@ -72,7 +75,13 @@ class SSM(Module):
         return stack(outputs, dim=-1)
 
     def _forward_pass_convolutional(self, u: Tensor) -> Tensor:
-        return u
+        _, _, time = u.shape
+        kernel = self._build_convolution_kernel(time)
+        u = pad(u, pad=(u.shape[-1], 0))
+        kernel = pad(kernel, pad=(kernel.shape[-1], 0))
+        kernel_fft = rfft(kernel, dim=-1)
+        input_fft = rfft(u, dim=-1)
+        return real(irfft(input_fft * kernel_fft, dim=-1))[..., :time]
 
     def _init_weights_random(self) -> None:
         self._A = Parameter(
@@ -123,6 +132,14 @@ class SSM(Module):
         coefficients = damp * exp(-1j * 2 * pi * frequency_steps / self._hidden_dim)
         self._A.data = eye(self._hidden_dim) * coefficients.view(-1, 1)
         self._C.data = eye(self._hidden_dim, dtype=complex64)
+
+    def _build_convolution_kernel(self, length: int) -> Tensor:
+        A_bar, B_bar, C_bar = self._discretize()
+        kernel_elements = []
+        for i in range(length):
+            kernel_elements.append(C_bar @ matrix_power(A_bar, i) @ B_bar)
+        kernel = stack(kernel_elements).squeeze()
+        return kernel
 
     def _discretize(self) -> Tuple[Tensor, Tensor, Tensor]:
         identity = eye(n=self._hidden_dim)

@@ -1,6 +1,6 @@
 from numpy import hanning
 from numpy.fft import fft, fftfreq, fftshift
-from torch import Tensor, zeros
+from torch import Tensor, zeros, rand, allclose
 from matplotlib.pyplot import figure, show, subplots
 from scipy.signal import ShortTimeFFT
 
@@ -55,18 +55,26 @@ def plot_frequency_response(ssm: SSM) -> None:
 if __name__ == "__main__":
     dataset = SpeechCommandsDataset(root="./data")
     model = SSM(
-        hidden_dim=128,
+        hidden_dim=8,
         step=1 / 16000,
-        init="stft",
-        init_discrete=True,
+        init="random",
         accelerator="cpu",
     )
+
+    model.training = True
+    x = rand(size=(4, 1, 10))
+    conv_output = model(x)
+    print("Conv Output", conv_output)
     model.training = False
+    rec_output = model(x)
+    print("Recurrent Output", rec_output)
 
-    plot_frequency_response(model)
+    print("Conv is about equal to recurrent : ", allclose(conv_output, rec_output))
 
+    """
     x, y = dataset[3221]
     x = x.unsqueeze(dim=0)
     output = model(x)
     plot_stft(x, output)
+    """
     show()
