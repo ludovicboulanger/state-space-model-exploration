@@ -1,14 +1,29 @@
 from numpy import hanning
 from numpy.fft import fft, fftfreq, fftshift
-from torch import Tensor, arange, complex64, exp, ones, pi, zeros, rand
-from torch.nn import CrossEntropyLoss
-from torch.optim import Adam
-from torch.utils.data import DataLoader
+from numpy.random import seed as seed_numpy
+from random import seed as seed_random
+from torch import (
+    Tensor,
+    arange,
+    complex64,
+    exp,
+    ones,
+    pi,
+    zeros,
+    rand,
+    manual_seed as seed_torch,
+)
 from matplotlib.pyplot import figure, show, subplots
 from scipy.signal import ShortTimeFFT
 
-from model import SSMLayer, SSMNetwork
+from state_space_model import SSMLayer
 from speech_commands_dataset import SpeechCommandsDataset
+
+
+def seed_everything() -> None:
+    seed_numpy(3221)
+    seed_random(3221)
+    seed_torch(3221)
 
 
 def plot_stft(input: Tensor, ssm_output: Tensor, title: str) -> None:
@@ -85,9 +100,14 @@ def run_ssm_as_stft() -> None:
     model.training = True
     conv_output = model(x)
     plot_stft(x, conv_output.squeeze(), title="SSM Output (Convolution)")
-    max_error = (rec_output - conv_output).abs().max()
-    relative_error = max_error / rec_output.abs().max()
-    print(f"Max error: {max_error}, Relative: {relative_error}")
+
+    max_error = (rec_output.real - conv_output.real).abs().max()
+    relative_error = max_error / rec_output.real.abs().max()
+    print(f"REAL Max error: {max_error}, Relative: {relative_error}")
+
+    max_error = (rec_output.imag - conv_output.imag).abs().max()
+    relative_error = max_error / rec_output.imag.abs().max()
+    print(f"IMAG Max error: {max_error}, Relative: {relative_error}")
 
 
 def compare_conv_versus_recurrent_view() -> None:
@@ -103,10 +123,8 @@ def compare_conv_versus_recurrent_view() -> None:
     from torch import real
 
     conv_output = real(model(x))
-    print(conv_output)
     model.training = False
     rec_output = model(x)
-    print(rec_output)
 
     max_error = (rec_output - conv_output).abs().max()
     relative_error = max_error / rec_output.abs().max()
@@ -114,7 +132,7 @@ def compare_conv_versus_recurrent_view() -> None:
 
 
 if __name__ == "__main__":
+    seed_everything()
     # compare_conv_versus_recurrent_view()
-    # run_ssm_as_stft()
-    train_ssm_on_speech_commands()
+    run_ssm_as_stft()
     show()

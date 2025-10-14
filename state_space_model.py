@@ -189,16 +189,15 @@ class SSMLayer(Module):
             x_i = x_i + B_bar @ u[..., i : i + 1].unsqueeze(dim=-1)
             out = C_bar @ x_i
             outputs.append(out.squeeze())
-        return stack(outputs, dim=-1)
+        out = stack(outputs, dim=-1)
+        return out
 
     def _forward_pass_convolutional(self, u: Tensor) -> Tensor:
         _, _, time = u.shape
-        u = pad(u, pad=(0, u.shape[-1]))
         kernel = self._build_convolution_kernel(time)
-        kernel = pad(kernel, pad=(0, kernel.shape[-1]))
-        kernel_fft = fft(kernel, dim=-1)
-        input_fft = fft(u, dim=-1)
-        return real(ifft(input_fft * kernel_fft, dim=-1)[..., :time])
+        kernel_fft = fft(kernel, dim=-1, n=2 * time)
+        input_fft = fft(u, dim=-1, n=2 * time)
+        return ifft(input_fft * kernel_fft.unsqueeze(dim=0), dim=-1)[..., :time]
 
     def _init_weights_random(self) -> None:
         self._A = Parameter(
