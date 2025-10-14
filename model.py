@@ -5,15 +5,131 @@ from torch import (
     Tensor,
     eye,
     ones,
+    real,
     zeros,
     stack,
     hstack,
 )
 from torch.fft import fft, ifft
 from torch.linalg import inv, matrix_power
-from torch.nn import Module, Parameter
+from torch.nn import (
+    Module,
+    Parameter,
+    Dropout1d,
+    GELU,
+    GroupNorm,
+    ModuleList,
+    Conv1d,
+)
 from torch.nn.functional import pad
 from torch.nn.init import xavier_normal_
+
+
+class SSMNetwork(Module):
+    def __init__(
+        self,
+        in_channels: int,
+        bottleneck_channels: int,
+        state_features: int,
+        out_channels: int,
+        num_layers: int,
+        output_activation: Optional[Module] = None,
+        step: float = 1.0,
+        A_init: Optional[Tensor] = None,
+        B_init: Optional[Tensor] = None,
+        C_init: Optional[Tensor] = None,
+        pre_norm: bool = False,
+        gelu: bool = False,
+        dropout_rate: float = 0.0,
+        init_discrete: bool = False,
+        accelerator: str = "cpu",
+    ) -> None:
+        super().__init__()
+        self._layers = ModuleList([])
+        self._layers.append(
+            Conv1d(
+                in_channels=in_channels, out_channels=bottleneck_channels, kernel_size=1
+            )
+        )
+        for _ in range(num_layers):
+            self._layers.append(
+                SSMSequenceBlock(
+                    in_channels=bottleneck_channels,
+                    state_features=state_features,
+                    step=step,
+                    A_init=A_init,
+                    B_init=B_init,
+                    C_init=C_init,
+                    init_discrete=init_discrete,
+                    pre_norm=pre_norm,
+                    gelu=gelu,
+                    dropout_rate=dropout_rate,
+                    requires_grad=True,
+                    accelerator=accelerator,
+                )
+            )
+        self._layers.append(
+            Conv1d(
+                in_channels=bottleneck_channels,
+                out_channels=out_channels,
+                kernel_size=1,
+            )
+        )
+        if output_activation is not None:
+            self._layers.append(output_activation)
+
+    def forward(self, x: Tensor) -> Tensor:
+        for block in self._layers:
+            x = block(x)
+        return x
+
+
+class SSMSequenceBlock(Module):
+    def __init__(
+        self,
+        in_channels: int,
+        state_features: int,
+        step: float = 1.0,
+        A_init: Optional[Tensor] = None,
+        B_init: Optional[Tensor] = None,
+        C_init: Optional[Tensor] = None,
+        pre_norm: bool = False,
+        gelu: bool = False,
+        dropout_rate: float = 0.0,
+        init_discrete: bool = False,
+        requires_grad: bool = False,
+        accelerator: str = "cpu",
+    ) -> None:
+        super(SSMSequenceBlock, self).__init__()
+        ssm_layer = SSMLayer(
+            num_features=in_channels,
+            hidden_dim=state_features,
+            step=step,
+            A_init=A_init,
+            B_init=B_init,
+            C_init=C_init,
+            init_discrete=init_discrete,
+            requires_grad=requires_grad,
+            accelerator=accelerator,
+        )
+        self._blocks = ModuleList([])
+        if pre_norm:
+            self._blocks.append(GroupNorm(num_groups=1, num_channels=in_channels))
+        self._blocks.append(ssm_layer)
+        # TODO: Validate that this is really the equivalent of using a Linear layer on the channel dim
+        self._blocks.append(
+            Conv1d(in_channels=in_channels, out_channels=in_channels, kernel_size=1)
+        )
+        if gelu:
+            self._blocks.append(GELU())
+        self._blocks.append(Dropout1d(p=dropout_rate))
+
+    def forward(self, u: Tensor) -> Tensor:
+        skip = u
+        for block in self._blocks:
+            u = block(u)
+        u = skip + u
+        return u
 
 
 class SSMLayer(Module):
@@ -26,7 +142,7 @@ class SSMLayer(Module):
         B_init: Optional[Tensor] = None,
         C_init: Optional[Tensor] = None,
         init_discrete: bool = False,
-        requires_grad: bool = True,
+        requires_grad: bool = False,
         accelerator: str = "cpu",
     ) -> None:
         super().__init__()
@@ -82,7 +198,7 @@ class SSMLayer(Module):
         kernel = pad(kernel, pad=(0, kernel.shape[-1]))
         kernel_fft = fft(kernel, dim=-1)
         input_fft = fft(u, dim=-1)
-        return ifft(input_fft * kernel_fft, dim=-1)[..., :time]
+        return real(ifft(input_fft * kernel_fft, dim=-1)[..., :time])
 
     def _init_weights_random(self) -> None:
         self._A = Parameter(

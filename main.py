@@ -1,10 +1,14 @@
+from time import sleep
 from numpy import hanning
 from numpy.fft import fft, fftfreq, fftshift
 from torch import Tensor, arange, complex64, exp, ones, pi, zeros, rand
+from torch.nn import CrossEntropyLoss
+from torch.optim import Adam
+from torch.utils.data import DataLoader
 from matplotlib.pyplot import figure, show, subplots
 from scipy.signal import ShortTimeFFT
 
-from model import SSMLayer
+from model import SSMLayer, SSMNetwork
 from speech_commands_dataset import SpeechCommandsDataset
 
 
@@ -87,6 +91,47 @@ def run_ssm_as_stft() -> None:
     print(f"Max error: {max_error}, Relative: {relative_error}")
 
 
+def train_ssm_on_speech_commands() -> None:
+    train_dataset = SpeechCommandsDataset(root="./data")
+    val_dataset = SpeechCommandsDataset(root="./data", subset="validation")
+    device = "cpu"
+    model = SSMNetwork(
+        in_channels=1,
+        bottleneck_channels=8,
+        state_features=16,
+        out_channels=train_dataset.num_labels,
+        output_activation=None,
+        num_layers=3,
+        step=1 / 16000,
+        pre_norm=True,
+        gelu=True,
+        dropout_rate=0.0,
+        accelerator="cpu",
+    )
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total number of parameters: {total_params}")
+    training_loader = DataLoader(dataset=train_dataset, batch_size=1, shuffle=True)
+    validation_loader = DataLoader(dataset=val_dataset, batch_size=1, shuffle=False)
+    optimizer = Adam(params=model.parameters(), lr=1e-3)
+    loss_fn = CrossEntropyLoss()
+    total_epochs = 100
+    for e in range(total_epochs):
+        for i, (x, y) in enumerate(training_loader):
+            x = x.to(device)
+            y = y.to(device)
+            y_hat = model(x)
+
+            optimizer.zero_grad()
+            loss = loss_fn(y_hat[..., -1], y)
+            loss.backward()
+
+            print(
+                f"[Epoch {e + 1}/{total_epochs}] [Batch {i}/{len(training_loader)}] [Train Loss {loss.item():.4f}]\r",
+                end="",
+            )
+        print()
+
+
 def compare_conv_versus_recurrent_view() -> None:
     model = SSMLayer(
         hidden_dim=1,
@@ -112,5 +157,6 @@ def compare_conv_versus_recurrent_view() -> None:
 
 if __name__ == "__main__":
     # compare_conv_versus_recurrent_view()
-    run_ssm_as_stft()
+    # run_ssm_as_stft()
+    train_ssm_on_speech_commands()
     show()
