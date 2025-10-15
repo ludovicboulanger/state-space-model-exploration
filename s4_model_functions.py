@@ -54,7 +54,7 @@ def K_conv(A_bar: Tensor, B_bar: Tensor, C_bar: Tensor, L: int) -> Tensor:
         element = C_bar @ matrix_power(A_bar, i) @ B_bar
         kernel_elements.append(element)
     kernel = hstack(kernel_elements)
-    return kernel.real
+    return kernel
 
 
 def random_SSM(N, dtype=float32):
@@ -93,7 +93,7 @@ def forward_pass_recurrent(
         out = C_bar @ x_i
         outputs.append(out)
     out = stack(outputs, dim=-1).view(batch, 1, -1)
-    return out.real
+    return out
 
 
 ######## Standard SSM Functions in order to compare S4 to Standard SSM ##########
@@ -143,7 +143,7 @@ def conv_from_gen(gen, L):
     omega_L = exp((-2j * pi) * (arange(L) / L))
     at_roots = gen(omega_L)
     out = ifft(at_roots, n=L, dim=0).reshape(L)
-    return out.real
+    return out
 
 
 def kernel_DPLR(
@@ -162,7 +162,7 @@ def kernel_DPLR(
     k11 = cauchy_kernel(a_term[1] * b_term[1], g, Lambda)
     at_roots = c * (k00 - k01 * (1.0 / (1.0 + k11)) * k10)
     output = ifft(at_roots, dim=0, n=L).reshape(L)
-    return output.real
+    return output
 
 
 def cauchy_kernel(v: Tensor, omega: Tensor, lambd: Tensor) -> Tensor:
@@ -220,6 +220,7 @@ def test_gen_inverse(L: int = 16, hidden_dim: int = 4) -> None:
     A_bar, B_bar, C_bar = discretize(A, B, C, 1 / L)
     b = K_conv(A_bar, B_bar, C_bar, L=L)
 
+    print("Comparing Inverse Kernel to Naive Kernel")
     a = conv_from_gen(K_gen_inverse(A_bar, B_bar, C_bar, L=L), L=L)
     compare_tensors(a, b)
 
@@ -234,6 +235,7 @@ def test_cauchy_kernel(L: int = 16, hidden_dim: int = 4) -> None:
     C = (eye(hidden_dim) - matrix_power(A_bar, L)).conj().T @ C_bar.ravel()
     b = kernel_DPLR(Lambda, P, Q, B, C, step=1.0 / L, L=L)
 
+    print("Comparing DPLR Kernel to Naive Kernel")
     compare_tensors(a, b)
 
 
@@ -254,7 +256,35 @@ def test_NPLR_versus_DPLR(N: int = 8) -> None:
     compare_tensors(A2, A4)
 
 
-def test_recurrent_view_versus_convolution_view(N: int = 8, L: int = 16):
+def test_naive_conv_versus_DPLR_conv(N: int = 8, L: int = 16) -> None:
+    step = 1 / L
+    Lambda, P, B, _ = generate_DPLR_HiPPO(N)
+    C = empty(size=(N,), dtype=complex64)
+    normal_(C)
+
+    K = kernel_DPLR(Lambda, P, P, B, C, step, L)
+
+    A_bar, B_bar, C_bar = discretize_DPLR(Lambda, P, P, B, C, step, L)
+    K2 = K_conv(A_bar, B_bar, C_bar, L=L)
+
+    test_input = rand(size=(1, 1, L))
+    a = forward_pass_convolution(test_input, K2)
+    b = forward_pass_convolution(test_input, K)
+    print("Comparing Naive Convolution to DPLR Convolution")
+    compare_tensors(a, b)
+
+    import matplotlib.pyplot as plt
+
+    diff = (a - b).abs()
+    plt.figure(figsize=(12, 4))
+    plt.plot(diff[0, 0, :].cpu())
+    plt.xlabel("Time")
+    plt.ylabel("Absolute Error")
+    plt.title("DPLR Conv vs Naive Conv Error Over Time")
+    plt.show()
+
+
+def test_recurrent_view_versus_convolution_view(N: int = 8, L: int = 16) -> None:
     step = 1 / L
     Lambda, P, B, _ = generate_DPLR_HiPPO(N)
     C = empty(size=(N,), dtype=complex64)
@@ -275,6 +305,26 @@ def test_recurrent_view_versus_convolution_view(N: int = 8, L: int = 16):
     print("Comparing DPLR Conv versus DPLR Recurrent")
     compare_tensors(y_conv, y_rec)
 
+    import matplotlib.pyplot as plt
+
+    diff = (y_conv - y_rec).abs()
+    plt.figure(figsize=(12, 4))
+    plt.plot(diff[0, 0, :].cpu())
+    plt.xlabel("Time")
+    plt.ylabel("Absolute Error")
+    plt.title("DPLR Conv vs Naive Conv Error Over Time")
+    plt.show()
+
 
 if __name__ == "__main__":
-    test_recurrent_view_versus_convolution_view(L=16)
+    hidden_dim = 8
+    seq_len = 16000
+    test_gen_inverse(seq_len, hidden_dim)
+    print("===================")
+    test_cauchy_kernel(seq_len, hidden_dim)
+    print("===================")
+    test_NPLR_versus_DPLR(N=hidden_dim)
+    print("===================")
+    test_naive_conv_versus_DPLR_conv(hidden_dim, seq_len)
+    print("===================")
+    test_recurrent_view_versus_convolution_view(N=hidden_dim, L=seq_len)
