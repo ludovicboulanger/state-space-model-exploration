@@ -5,7 +5,6 @@ from torch import (
     Tensor,
     eye,
     ones,
-    real,
     zeros,
     stack,
     hstack,
@@ -21,7 +20,6 @@ from torch.nn import (
     ModuleList,
     Conv1d,
 )
-from torch.nn.functional import pad
 from torch.nn.init import xavier_normal_
 
 
