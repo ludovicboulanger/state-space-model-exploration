@@ -1,0 +1,123 @@
+from __future__ import annotations
+from argparse import ArgumentParser, Namespace
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Union
+
+
+@dataclass
+class TrainingConfig:
+    # Persistence
+    save_dir: str = str(Path(__file__).parent / "training-runs")
+    data_root: str = str(Path(__file__).parent / "data")
+    run_id: str = "test-run-id"
+    smoke_test: bool = False
+    # Training Hyperparameters
+    max_epochs: int = 100
+    batch_size: int = 8
+    lr: float = 1e-3
+    lr_decay: float = 0.8
+    lr_decay_patience: int = 3
+    early_stop_patience: int = 10
+    # NN Hyperparameters
+    num_layers: int = 4
+    hidden_dim: int = 8
+    channel_dim: int = 8
+    dropout_prob: float = 0.0
+    seq_len: int = 16000
+    step: float = 1 / 16e3
+
+    def __getitem__(self, key: str) -> Union[str, float, int]:
+        return getattr(self, key)
+
+    def __setitem__(self, key: str, value: Union[str, float, int]) -> None:
+        setattr(self, key, value)
+
+
+class ConfigParser:
+    def __init__(self) -> None:
+        self._default_config: TrainingConfig = TrainingConfig()
+        self._run_config: TrainingConfig = TrainingConfig()
+
+    @staticmethod
+    def from_cli_args() -> TrainingConfig:
+        parser = ArgumentParser()
+
+        group = parser.add_argument_group(title="Persistence Parameters")
+        group.add_argument(
+            "--save_dir", required=True, help="Where to save the run data"
+        )
+        group.add_argument("--run_id", help="The id to use for the current run")
+        group.add_argument(
+            "--data_root",
+            required=True,
+            help="The directory where the data is stored",
+        )
+        group.add_argument(
+            "--smoke_test",
+            help="Whether to run a quick smoke test or not",
+            action="store_true",
+        )
+
+        group = parser.add_argument_group(title="Training Hyperparameters")
+        group.add_argument(
+            "--max_epochs", help="the maximum number of epochs to train for"
+        )
+        group.add_argument("--batch_size", help="The batch size to use")
+        group.add_argument("--lr", help="The learning rate to use")
+        group.add_argument("--lr_decay", help="The learning rate decay to use")
+        group.add_argument(
+            "--lr_decay_patience",
+            help="The number of epochs to wait before decaying the learning rate",
+        )
+        group.add_argument(
+            "--early_stop_patience",
+            help="The number of epochs to wait before early stopping",
+        )
+
+        group = parser.add_argument_group(title="Neural Network Training Parameters")
+        group.add_argument(
+            "--num_layers",
+            help="the number of horizontally stacked SSM blocks",
+        )
+        group.add_argument(
+            "--hidden_dim",
+            help="The dimension of the hidden state in each SSM",
+        )
+        group.add_argument(
+            "--channel_dim",
+            help="The number of vertically stacked SSM layers",
+        )
+        group.add_argument(
+            "--dropout_prob",
+            help="The dropout probability in SSM blocks",
+        )
+        group.add_argument(
+            "--step",
+            help="The step size to use",
+        )
+        group.add_argument("--seq_len", help="The expected sequence length as input")
+        group.add_argument(
+            "--classification_win_size",
+            help="The size of the classification window to use. The classification will take the last n elements.",
+        )
+        return ConfigParser._resolve_args(parser.parse_args())
+
+    @staticmethod
+    def _resolve_args(args: Namespace) -> TrainingConfig:
+        config = TrainingConfig()
+        for arg, value in vars(args).items():
+            if value is None:
+                continue
+            if isinstance(value, str) and ";" in value:
+                raise ValueError("Optuna is not supported yet.")
+            elif isinstance(value, str) and "," in value:
+                raise ValueError("Optuna is not supported yet.")
+            else:
+                if isinstance(config[arg], str):
+                    config[arg] = value
+                elif isinstance(config[arg], int):
+                    config[arg] = int(value)
+                elif isinstance(config[arg], float):
+                    config[arg] = float(value)
+        return config

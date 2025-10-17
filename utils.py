@@ -36,8 +36,8 @@ def kernel_DPLR(
     a_term = (C.conj_physical(), Q.conj_physical())
     b_term = (B, P)
 
-    g = (2.0 / step) * ((1.0 - omega_L) / (1.0 + omega_L))
-    c = 2.0 / (1.0 + omega_L)
+    g = (2.0 / step) * ((1.0 - omega_L) / (1.0 + omega_L)).to(Lambda.device)
+    c = 2.0 / (1.0 + omega_L).to(Lambda.device)
 
     k00 = cauchy_kernel(a_term[0] * b_term[0], g, Lambda)
     k01 = cauchy_kernel(a_term[0] * b_term[1], g, Lambda)
