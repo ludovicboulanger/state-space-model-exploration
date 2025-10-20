@@ -71,7 +71,7 @@ class SpeechCommandsDataset(Dataset):
         data, _, label, _, _ = self._dataset[n]
         label_as_tensor = tensor(self.label_to_id[label]).long()
         data = self._pad_data_if_needed(data)
-        return data, label_as_tensor
+        return data.transpose(dim0=-1, dim1=-2), label_as_tensor
 
     def __len__(self) -> int:
         return len(self._dataset)

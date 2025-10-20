@@ -42,7 +42,7 @@ class S4Block(Module):
         y = self._non_linearity(y)
         y = self._dropout(y)
         y = self._output_layer(y)
-        return self._output_non_linearity(input + y)
+        return y + input
 
 
 class S4Model(Module):
