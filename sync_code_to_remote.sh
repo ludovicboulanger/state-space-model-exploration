@@ -22,5 +22,5 @@ rsync \
   --exclude "__pycache__" \
   --exclude ".*" \
   --exclude "data" \
-  --exclude "training_runs" \
+  --exclude "training-runs" \
   -avz -e "ssh -i $keyfile" $SCRIPT_PATH $username@$remotename:$destination

@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Tuple, Union
 from torch import (
     Tensor,
     arange,
@@ -30,31 +30,46 @@ def generate_hippo_matrix(N: int) -> Tensor:
 
 
 def kernel_DPLR(
-    Lambda: Tensor, P: Tensor, Q: Tensor, B: Tensor, C: Tensor, step: float, L: int
+    Lambda: Tensor,
+    P: Tensor,
+    Q: Tensor,
+    B: Tensor,
+    C: Tensor,
+    step: Tensor,
+    L: int,
 ) -> Tensor:
-    omega_L = exp((-2j * pi) * (arange(L) / L))
+    step = step.unsqueeze(dim=0)
+    omega_L = exp((-2j * pi) * (arange(L) / L)).unsqueeze(dim=-1)
     a_term = (C.conj_physical(), Q.conj_physical())
     b_term = (B, P)
 
-    g = (2.0 / step) * ((1.0 - omega_L) / (1.0 + omega_L)).to(Lambda.device)
+    g = (2.0 / step.view(1, -1)) * ((1.0 - omega_L) / (1.0 + omega_L)).to(Lambda.device)
     c = 2.0 / (1.0 + omega_L).to(Lambda.device)
 
     k00 = cauchy_kernel(a_term[0] * b_term[0], g, Lambda)
     k01 = cauchy_kernel(a_term[0] * b_term[1], g, Lambda)
     k10 = cauchy_kernel(a_term[1] * b_term[0], g, Lambda)
     k11 = cauchy_kernel(a_term[1] * b_term[1], g, Lambda)
-    at_roots = c.view(-1, 1) * (k00 - k01 * (1.0 / (1.0 + k11)) * k10)
+    at_roots = c * (k00 - k01 * (1.0 / (1.0 + k11)) * k10)
     output = ifft(at_roots, dim=0, n=L)
     return output
 
 
 def cauchy_kernel(v: Tensor, omega: Tensor, lambd: Tensor) -> Tensor:
-    omega = omega.view(-1, 1, 1)
-    return (v / (omega - lambd)).sum(dim=-1)
+    omega = omega.unsqueeze(dim=1)
+    v = v.transpose(dim0=-1, dim1=-2).unsqueeze(dim=0)
+    lambd = lambd.transpose(dim0=-1, dim1=-2).unsqueeze(dim=0)
+    return (v / (omega - lambd)).sum(dim=1)
 
 
 def discretize_DPLR(
-    Lambda: Tensor, P: Tensor, Q: Tensor, B: Tensor, C: Tensor, step: float, L: int
+    Lambda: Tensor,
+    P: Tensor,
+    Q: Tensor,
+    B: Tensor,
+    C: Tensor,
+    step: Tensor,
+    L: int,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     B = B.unsqueeze(dim=-1)
     C = C.unsqueeze(dim=1)
@@ -65,9 +80,9 @@ def discretize_DPLR(
     ).conj_physical().transpose(dim0=-1, dim1=-2)
     I_matrix = eye(N).unsqueeze(dim=0)
 
-    A0 = (2.0 / step) * I_matrix + A
+    A0 = (2.0 / step.view(-1, 1, 1)) * I_matrix + A
 
-    D = diag_embed(1.0 / ((2.0 / step) - Lambda))
+    D = diag_embed(1.0 / ((2.0 / step.view(-1, 1)) - Lambda))
     Qc = Q.conj_physical().unsqueeze(dim=1)
     P2 = P.unsqueeze(dim=-1)
     A1 = D - (D @ P2 * (1.0 / (1 + (Qc @ D @ P2))) * Qc @ D)

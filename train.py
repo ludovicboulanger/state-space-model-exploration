@@ -12,7 +12,8 @@ from lightning.pytorch.callbacks import (
     ModelCheckpoint,
 )
 from lightning.pytorch.loggers import CSVLogger
-from torch import Tensor, set_float32_matmul_precision
+from matplotlib.pyplot import show, subplots
+from torch import Tensor
 from torch.utils.data import DataLoader
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -21,13 +22,14 @@ from torch.nn.functional import cross_entropy
 from torchmetrics import Accuracy
 
 from config import ConfigParser, TrainingConfig
+from google_speech_commands_dataset_small import SpeechCommandsDatasetSmall
 from mnist_dataset import MNISTDataset
 from speech_commands_dataset import SpeechCommandsDataset
 from s4_model import S4Block
 
 
 class S4Network(LightningModule):
-    def __init__(self, config: TrainingConfig) -> None:
+    def __init__(self, config: TrainingConfig, output_dim: int) -> None:
         super().__init__()
         self._inference_mode = False
         self._encoder = Linear(in_features=1, out_features=config.channel_dim)
@@ -38,12 +40,14 @@ class S4Network(LightningModule):
                     channels=config.channel_dim,
                     hidden_dim=config.hidden_dim,
                     seq_len=config.seq_len,
-                    step=config.step,
+                    pre_norm=config.pre_norm,
+                    norm_type=config.norm,
+                    non_linearity=config.activation,
                     dropout_prob=config.dropout_prob,
                 )
             )
-        self._decoder = Linear(in_features=config.channel_dim, out_features=35)
-        self._accuracy = Accuracy(task="multiclass", num_classes=35)
+        self._decoder = Linear(in_features=config.channel_dim, out_features=output_dim)
+        self._accuracy = Accuracy(task="multiclass", num_classes=output_dim)
         self._config = config
 
     @property
@@ -57,48 +61,71 @@ class S4Network(LightningModule):
             block.inference_mode = mode  # type: ignore
 
     def training_step(self, batch: Tuple[Tensor, ...]) -> Tensor:
-        loss, accuracy = self._forward_pass(batch)
+        _, metrics = self._forward_pass(batch)
         self.log(
             name="train_loss",
-            value=loss.item(),
+            value=metrics["loss"].item(),
             on_step=False,
             on_epoch=True,
             sync_dist=True,
         )
         self.log(
             name="train_accuracy",
-            value=accuracy.item(),
+            value=metrics["acc"].item(),
             on_step=False,
             on_epoch=True,
             sync_dist=True,
         )
-        return loss
+        return metrics["loss"]
 
     def validation_step(self, batch: Tuple[Tensor, ...]) -> Tensor:
-        loss, accuracy = self._forward_pass(batch)
+        _, metrics = self._forward_pass(batch)
         self.log(
             name="valid_loss",
-            value=loss.item(),
+            value=metrics["loss"].item(),
             on_step=False,
             on_epoch=True,
             sync_dist=True,
         )
         self.log(
             name="valid_accuracy",
-            value=accuracy.item(),
+            value=metrics["acc"].item(),
             on_step=False,
             on_epoch=True,
             sync_dist=True,
         )
-        return loss
+        return metrics["loss"]
+
+    def test_step(self, batch: Tuple[Tensor, ...]) -> Tensor:
+        logits, metrics = self._forward_pass(batch)
+        fig, ax = subplots()
+        ax.plot(logits.squeeze().transpose(-1, -2))
+        show()
+        return metrics["loss"]
 
     def configure_optimizers(self) -> Dict[str, Any]:  # type: ignore
-        optimizer = Adam(params=self._blocks.parameters(), lr=config.lr)
+        hippo_parameters = []
+        nn_parameters = []
+        for name, param in self._blocks.named_parameters():
+            param_name = name.split(".")[-1]
+            if param_name in ["_L", "_P", "_C", "_B", "_step"]:
+                hippo_parameters.append(param)
+            else:
+                nn_parameters.append(param)
+
+        optimizer = Adam(
+            params=[
+                {"params": hippo_parameters, "lr": min(self._config.lr, 1e-3)},
+                {"params": nn_parameters, "lr": self._config.lr},
+            ],
+            weight_decay=0,
+        )
         scheduler = ReduceLROnPlateau(
             optimizer=optimizer,
             mode="min",
             factor=config.lr_decay,
             patience=config.lr_decay_patience,
+            threshold=config.lr_delta_threshold,
         )
         return {
             "optimizer": optimizer,
@@ -111,43 +138,42 @@ class S4Network(LightningModule):
             },
         }
 
-    def _forward_pass(self, batch: Tuple[Tensor, ...]) -> Tuple[Tensor, Tensor]:
+    def _forward_pass(
+        self, batch: Tuple[Tensor, ...]
+    ) -> Tuple[Tensor, Dict[str, Tensor]]:
         x, y = batch
 
         y_hat = self._encoder(x)
         for block in self._blocks:
             y_hat = block(y_hat)
-        y_hat = self._decoder(y_hat)
-        logits = y_hat[:, -1, :]
+        y_hat_no_agg = y_hat
+        y_hat = y_hat.mean(dim=1)
+        logits = self._decoder(y_hat)
 
         loss = cross_entropy(logits, y)
         acc = self._accuracy(logits.argmax(dim=-1), y)
-        return loss, acc
+        return y_hat_no_agg, {"loss": loss, "acc": acc}
 
 
 def train_model(config: TrainingConfig) -> float:
     (Path(config.save_dir) / config.run_id).mkdir(parents=True, exist_ok=True)
-    ssm = S4Network(config)
-    summary = ModelSummary(ssm, max_depth=1000)
+    config.to_json(Path(config.save_dir) / config.run_id / "training_config.json")
 
     if _get_node_count() > 1 or _get_device_count_per_node() > 1:
         use_ddp = True
         training_strategy = "ddp"
+        plugins = [SLURMEnvironment(auto_requeue=False)]
     else:
         use_ddp = False
         training_strategy = "auto"
+        plugins = None
 
-    with open(
-        Path(config.save_dir) / config.run_id / "model_summary.txt", "w"
-    ) as ostream:
-        ostream.write(str(summary))
-
-    training_dataset = SpeechCommandsDataset(
+    training_dataset = SpeechCommandsDatasetSmall(
         root=config.data_root,
         download=True,
         subset="training",
     )
-    validation_dataset = SpeechCommandsDataset(
+    validation_dataset = SpeechCommandsDatasetSmall(
         root=config.data_root,
         download=True,
         subset="validation",
@@ -171,7 +197,7 @@ def train_model(config: TrainingConfig) -> float:
         devices=_get_device_count_per_node(),
         num_nodes=_get_node_count(),
         strategy=training_strategy,
-        plugins=[SLURMEnvironment(auto_requeue=False)],
+        plugins=plugins,  # type: ignore
         max_epochs=config.max_epochs,
         logger=CSVLogger(save_dir=Path(config.save_dir) / config.run_id, name="logs"),
         callbacks=[
@@ -179,11 +205,13 @@ def train_model(config: TrainingConfig) -> float:
             EarlyStopping(
                 monitor="valid_loss",
                 patience=config.early_stop_patience,
+                min_delta=config.early_stop_threshold,
             ),
             ModelCheckpoint(
                 dirpath=Path(config.save_dir) / config.run_id,
                 filename="last_checkpoint",
                 every_n_epochs=1,
+                # TODO: This should be False I think
                 save_on_train_epoch_end=True,
                 enable_version_counter=False,
             ),
@@ -197,6 +225,14 @@ def train_model(config: TrainingConfig) -> float:
             ),
         ],
     )
+
+    ssm = S4Network(config, output_dim=training_dataset.num_labels)
+    summary = ModelSummary(ssm, max_depth=1000)
+    with open(
+        Path(config.save_dir) / config.run_id / "model_summary.txt", "w"
+    ) as ostream:
+        ostream.write(str(summary))
+
     ckpt_file = Path(config.save_dir) / config.run_id / "last_checkpoint.ckpt"
     trainer.fit(
         ssm,
@@ -231,7 +267,6 @@ def _get_cpu_count_per_node() -> int:
 if __name__ == "__main__":
     from torch.cuda import device_count
 
-    set_float32_matmul_precision("medium")
     print(f"RANK: {environ.get('SLURM_PROCID', 'N/A')}")
     print(f"LOCAL_RANK: {environ.get('SLURM_LOCALID', 'N/A')}")
     print(f"CUDA_VISIBLE_DEVICES: {environ.get('CUDA_VISIBLE_DEVICES', 'N/A')}")

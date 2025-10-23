@@ -1,6 +1,7 @@
 from __future__ import annotations
 from argparse import ArgumentParser, Namespace
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from json import dump, load
 from pathlib import Path
 from typing import Union
 
@@ -18,20 +19,39 @@ class TrainingConfig:
     lr: float = 1e-3
     lr_decay: float = 0.8
     lr_decay_patience: int = 3
+    lr_delta_threshold: float = 1e-4
     early_stop_patience: int = 10
+    early_stop_threshold: float = 1e-4
     # NN Hyperparameters
     num_layers: int = 4
     hidden_dim: int = 8
     channel_dim: int = 8
     dropout_prob: float = 0.0
+    pre_norm: bool = True
+    norm: str = "layer"
+    activation: str = "glu"
     seq_len: int = 16000
-    step: float = 1 / 16e3
 
-    def __getitem__(self, key: str) -> Union[str, float, int]:
+    def __getitem__(self, key: str) -> Union[str, float, int, bool]:
         return getattr(self, key)
 
-    def __setitem__(self, key: str, value: Union[str, float, int]) -> None:
+    def __setitem__(self, key: str, value: Union[str, float, int, bool]) -> None:
         setattr(self, key, value)
+
+    @staticmethod
+    def from_json(path: Path) -> TrainingConfig:
+        training_config = TrainingConfig()
+        with open(path, "r") as istream:
+            config_dict = load(istream)
+
+        for key, value in config_dict.items():
+            training_config[key] = value
+
+        return training_config
+
+    def to_json(self, path: Path) -> None:
+        with open(path, "w") as ostream:
+            dump(asdict(self), ostream)
 
 
 class ConfigParser:
@@ -71,8 +91,16 @@ class ConfigParser:
             help="The number of epochs to wait before decaying the learning rate",
         )
         group.add_argument(
+            "--lr_delta_threshold",
+            help="The threshold to consider an improvement in the loss for the ReduceLROnPleateau scheduler",
+        )
+        group.add_argument(
             "--early_stop_patience",
             help="The number of epochs to wait before early stopping",
+        )
+        group.add_argument(
+            "--early_stop_threshold",
+            help="The threshold to consider an improvement in the loss for the EarlyStopping callback",
         )
 
         group = parser.add_argument_group(title="Neural Network Training Parameters")
@@ -93,8 +121,16 @@ class ConfigParser:
             help="The dropout probability in SSM blocks",
         )
         group.add_argument(
-            "--step",
-            help="The step size to use",
+            "--pre_norm",
+            help="Whether to normalize before or after the SSM in a SSM block",
+        )
+        group.add_argument(
+            "--norm",
+            help="The normalization layer to use. Can be either layer or batch. Default is layer",
+        )
+        group.add_argument(
+            "--activation",
+            help="The activation functions to use in SSM blocks. Can be sigmoid, gelu, glu. Default is glu",
         )
         group.add_argument("--seq_len", help="The expected sequence length as input")
         group.add_argument(
@@ -120,4 +156,6 @@ class ConfigParser:
                     config[arg] = int(value)
                 elif isinstance(config[arg], float):
                     config[arg] = float(value)
+                elif isinstance(config[arg], bool):
+                    config[arg] = bool(value.lower() == "true")
         return config
