@@ -12,7 +12,6 @@ from lightning.pytorch.callbacks import (
     ModelCheckpoint,
 )
 from lightning.pytorch.loggers import CSVLogger
-from matplotlib.pyplot import show, subplots
 from torch import Tensor
 from torch.utils.data import DataLoader
 from torch.optim import Adam
@@ -94,13 +93,6 @@ class S4Network(LightningModule):
             on_epoch=True,
             sync_dist=True,
         )
-        return metrics["loss"]
-
-    def test_step(self, batch: Tuple[Tensor, ...]) -> Tensor:
-        logits, metrics = self._forward_pass(batch)
-        fig, ax = subplots()
-        ax.plot(logits.squeeze().transpose(-1, -2))
-        show()
         return metrics["loss"]
 
     def configure_optimizers(self) -> Dict[str, Any]:  # type: ignore
@@ -192,6 +184,13 @@ def train_model(config: TrainingConfig) -> float:
         num_workers=_get_cpu_count_per_node(),
         pin_memory=use_ddp,
     )
+    """
+    EarlyStopping(
+        monitor="valid_loss",
+        patience=config.early_stop_patience,
+        min_delta=config.early_stop_threshold,
+    ),
+    """
     trainer = Trainer(
         deterministic=True,
         devices=_get_device_count_per_node(),
@@ -202,17 +201,11 @@ def train_model(config: TrainingConfig) -> float:
         logger=CSVLogger(save_dir=Path(config.save_dir) / config.run_id, name="logs"),
         callbacks=[
             LearningRateMonitor(logging_interval="epoch"),
-            EarlyStopping(
-                monitor="valid_loss",
-                patience=config.early_stop_patience,
-                min_delta=config.early_stop_threshold,
-            ),
             ModelCheckpoint(
                 dirpath=Path(config.save_dir) / config.run_id,
                 filename="last_checkpoint",
                 every_n_epochs=1,
-                # TODO: This should be False I think
-                save_on_train_epoch_end=True,
+                save_on_train_epoch_end=False,
                 enable_version_counter=False,
             ),
             ModelCheckpoint(
@@ -221,6 +214,7 @@ def train_model(config: TrainingConfig) -> float:
                 monitor="valid_loss",
                 mode="min",
                 save_last=False,
+                save_on_train_epoch_end=False,
                 enable_version_counter=False,
             ),
         ],

@@ -1,15 +1,17 @@
 from typing import List, Tuple
-from numpy import log
+from numpy import log as nplog
 from torch import (
     Tensor,
     clamp_max,
     complex64,
     concatenate,
     exp,
+    log,
     normal,
     ones,
     hstack,
     rand,
+    view_as_real,
     zeros,
 )
 from torch.fft import rfft, irfft
@@ -26,7 +28,13 @@ from torch.nn import (
     ReLU,
 )
 
-from utils import discretize_DPLR, generate_DPLR_HiPPO, kernel_DPLR, compare_tensors
+from utils import (
+    discretize_DPLR,
+    generate_DPLR_HiPPO,
+    kernel_DPLR,
+    compare_tensors,
+    nplr_from_hippo,
+)
 
 
 class S4Block(Module):
@@ -125,7 +133,8 @@ class S4Model(Module):
     ) -> None:
         super().__init__()
         self._in_channels = in_channels
-        self._hidden_dim = hidden_dim
+        # Assume conjugate symmetry in Complex SSM parameters
+        self._hidden_dim = hidden_dim // 2
         self._seq_len = seq_len
         self._inference_mode = False
         self._init_DPLR_HiPPO_matrix()
@@ -176,13 +185,12 @@ class S4Model(Module):
         return out.real
 
     def _init_DPLR_HiPPO_matrix(self) -> None:
-        Lambda, P, B, _ = generate_DPLR_HiPPO(self._hidden_dim)
-        # C = normal(mean=0.0, std=0.5**0.5, size=(self._hidden_dim,), dtype=complex64)
-        # D = ones(size=(1,))
+        A, P, B, _ = nplr_from_hippo(self._hidden_dim * 2)
         C = normal(
             mean=0.0,
-            std=0.5**0.5,
+            std=1,
             size=(
+                1,
                 self._in_channels,
                 self._hidden_dim,
             ),
@@ -190,26 +198,22 @@ class S4Model(Module):
         )
         D = normal(mean=0.0, std=1, size=(1, self._in_channels))
 
-        Lambda = Lambda.unsqueeze(dim=0).repeat(self._in_channels, 1)
-        P = P.unsqueeze(dim=0).repeat(self._in_channels, 1)
+        A = A.unsqueeze(dim=0).repeat(self._in_channels, 1)
         B = B.unsqueeze(dim=0).repeat(self._in_channels, 1)
-        # C = C.unsqueeze(dim=0).repeat(self._in_channels, 1)
-        # D = D.unsqueeze(dim=0).repeat(self._in_channels, 1)
+        P = P.unsqueeze(dim=0).repeat(self._in_channels, 1)
         step = rand(size=(self._in_channels,))
-        step = exp(step * (log(1e-1) - log(1e-4)) + log(1e-4))
+        step = exp(step * (nplog(1e-1) - nplog(1e-4)) + nplog(1e-4))
+        # softplus initialization to match paper
+        step = log(exp(step) - 1)
 
-        self._L = Parameter(data=Lambda, requires_grad=True)
+        # Log init the A real part like in the paper
+        self._A_real = Parameter(data=log(-A.real), requires_grad=True)
+        self._A_imag = Parameter(data=-A.imag, requires_grad=True)
         self._P = Parameter(data=P, requires_grad=True)
-        self._B = Parameter(data=B, requires_grad=True)
-        self._C = Parameter(data=C, requires_grad=True)
+        self._B = Parameter(data=view_as_real(B), requires_grad=True)
+        self._C = Parameter(data=view_as_real(C.conj_physical()), requires_grad=True)
         self._D = Parameter(data=D, requires_grad=True)
         self._step = Parameter(data=step, requires_grad=True)
-        self.register_parameter(name="_L", param=self._L)
-        self.register_parameter(name="_P", param=self._P)
-        self.register_parameter(name="_B", param=self._B)
-        self.register_parameter(name="_C", param=self._C)
-        self.register_parameter(name="_D", param=self._D)
-        self.register_parameter(name="_step", param=self._step)
 
     def _generate_kernel(self) -> Tensor:
         return kernel_DPLR(

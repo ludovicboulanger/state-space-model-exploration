@@ -8,7 +8,7 @@
 #SBATCH --signal=SIGUSR1@90
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
-RUN_ID=40637534
+RUN_ID=80320483
 SOURCE_DIR=/home/ludoboul/ssm-speech-processing
 CHECKPOINT_DIR=/home/ludoboul/projects/def-seanwood/ludoboul/training-runs/ssm-speech-processing/google_speech_commands_small
 DATASET_DIR=$SLURM_TMPDIR/data/SpeechCommands/speech_commands_v0.02
@@ -41,7 +41,7 @@ srun --ntasks=4 python3 ${SOURCE_DIR}/train.py \
     --max_epochs 100 \
     --lr 1e-2 \
     --lr_delta_threshold 1e-3 \
-    --early_stop_threshold 1e-3 \
+    --lr_decay_patience 10 \
     --activation gelu \
     --norm batch \
     --num_layers 6 \
