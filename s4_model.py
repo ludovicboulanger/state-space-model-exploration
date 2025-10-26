@@ -128,16 +128,18 @@ class S4Model(Module):
     def __init__(
         self,
         in_channels: int,
+        n_ssms: int,
         hidden_dim: int,
         seq_len: int,
     ) -> None:
         super().__init__()
         self._in_channels = in_channels
+        self._n_ssms = n_ssms
         # Assume conjugate symmetry in Complex SSM parameters
         self._hidden_dim = hidden_dim // 2
         self._seq_len = seq_len
         self._inference_mode = False
-        self._init_DPLR_HiPPO_matrix()
+        self._register_parameters()
 
     @property
     def inference_mode(self) -> bool:
@@ -184,7 +186,8 @@ class S4Model(Module):
         out = hstack(outputs)
         return out.real
 
-    def _init_DPLR_HiPPO_matrix(self) -> None:
+    def _register_parameters(self) -> None:
+        assert self._in_channels % self._n_ssms == 0, "n_ssms must divide in_channels."
         A, P, B, _ = nplr_from_hippo(self._hidden_dim * 2)
         C = normal(
             mean=0.0,
@@ -198,9 +201,9 @@ class S4Model(Module):
         )
         D = normal(mean=0.0, std=1, size=(1, self._in_channels))
 
-        A = A.unsqueeze(dim=0).repeat(self._in_channels, 1)
-        B = B.unsqueeze(dim=0).repeat(self._in_channels, 1)
-        P = P.unsqueeze(dim=0).repeat(self._in_channels, 1)
+        A = A.unsqueeze(dim=0).repeat(self._n_ssms, 1)
+        B = B.unsqueeze(dim=0).repeat(self._n_ssms, 1)
+        P = P.unsqueeze(dim=0).repeat(self._n_ssms, 1)
         step = rand(size=(self._in_channels,))
         step = exp(step * (nplog(1e-1) - nplog(1e-4)) + nplog(1e-4))
         # softplus initialization to match paper
@@ -217,7 +220,7 @@ class S4Model(Module):
 
     def _generate_kernel(self) -> Tensor:
         return kernel_DPLR(
-            clamp_max(self._L.real, -1e-4) + 1j * self._L.imag,
+            clamp_max(self._A_real, -1e-4) + 1j * self._A_imag,
             self._P,
             self._P,
             self._B,
@@ -228,7 +231,7 @@ class S4Model(Module):
 
     def _discretize(self) -> Tuple[Tensor, Tensor, Tensor]:
         return discretize_DPLR(
-            clamp_max(self._L.real, -1e-4) + 1j * self._L.imag,
+            clamp_max(self._A_real, -1e-4) + 1j * self._A_imag,
             self._P,
             self._P,
             self._B,
@@ -241,12 +244,12 @@ class S4Model(Module):
 if __name__ == "__main__":
     from torch import rand, manual_seed
 
-    manual_seed(3221)
+    manual_seed(2222)
 
     batch = 1
-    channels = 4
+    channels = 8
     time = 1000
-    hidden_dim = 128
+    hidden_dim = 4
 
     test_input = rand(size=(batch, time, channels))
     ssm = S4Model(

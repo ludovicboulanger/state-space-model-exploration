@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=4
-#SBATCH --gpus-per-node=h100:4
-#SBATCH --cpus-per-task=4
+#SBATCH --ntasks-per-node=2
+#SBATCH --gpus-per-node=h100:2
+#SBATCH --cpus-per-task=1
 #SBATCH --mem=64G
 #SBATCH --time=01:00:00
 #SBATCH --signal=SIGUSR1@90
@@ -33,11 +33,11 @@ if [ ! -f "${CHECKPOINT_DIR}/${RUN_ID}/training_complete.flag" ]; then
 fi
 
 
-srun --ntasks=4 python3 ${SOURCE_DIR}/train.py \
+srun python3 ${SOURCE_DIR}/train.py \
     --save_dir $CHECKPOINT_DIR \
     --run_id $RUN_ID \
     --data_root ${SLURM_TMPDIR}/data/ \
-    --batch_size 5 \
+    --batch_size 10 \
     --max_epochs 100 \
     --lr 1e-2 \
     --lr_delta_threshold 1e-3 \

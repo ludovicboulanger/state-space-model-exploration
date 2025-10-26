@@ -1,4 +1,6 @@
 from typing import Optional, Tuple, Union
+
+from einops import rearrange
 from torch import (
     Tensor,
     arange,
@@ -19,23 +21,26 @@ from torch import (
     sort,
     sum,
     sqrt,
+    tensor,
     tril,
     view_as_complex,
+    view_as_real,
     where,
     zeros,
 )
 from torch.fft import ifft
-from torch.linalg import inv, eigh
+from torch.linalg import inv, eigh, solve
 
 
 def build_legs_matrices(N: int) -> Tuple[Tensor, Tensor]:
     # Taken from https://github.com/state-spaces/s4/blob/main/src/models/hippo/hippo.py
     Q = arange(N).double()
-    cols, rows = meshgrid([Q, Q])
-    M = -1 * (where(rows > cols, 2 * Q + 1, 0))
-    T = sqrt(diag(2 * Q + 1))
+    rows, cols = meshgrid(Q, Q, indexing="ij")
+    R = 2 * Q + 1
+    M = -1 * (where(rows >= cols, R, 0) - diag(Q))
+    T = sqrt(diag(R))
     A = T @ M @ inv(T)
-    B = diag(T).unsqueeze(dim=-1)
+    B = diag(T)
     return A, B
 
 
@@ -67,7 +72,7 @@ def nplr_from_hippo(
 
     W_re = mean(diagonal(AP), dim=-1, keepdim=True)
     AP = AP.double()
-    W_im, V = eigh(AP * 1j)
+    W_im, V = eigh(AP * -1j)
     W_im, V = W_im.to(complex64), V.to(complex64)
     W = W_re + 1j * W_im
 
@@ -85,13 +90,13 @@ def nplr_from_hippo(
         V[0, -1] = 2**-0.5
         V[1, -1] = 2**-0.5 * 1j
 
-    _AP = diag_embed(W) @ V.conj_physical().transpose(-1, -2)
+    _AP = V @ diag_embed(W) @ V.conj_physical().transpose(-1, -2)
     err = sum((2 * _AP.real - AP) ** 2) / N
     if err > 1e-5:
         print("Warning: Diagonalization is not numerically precise - error : ", err)
 
     V_inv = V.conj().transpose(-1, -2)
-    B = einsum("ij,j->i", V_inv, B.to(V))
+    B = einsum("ij, j->i", V_inv, B.to(V))
     P = einsum("ij,...j -> ...i", V_inv, P.to(V))
 
     if B_clip is not None:
@@ -100,19 +105,35 @@ def nplr_from_hippo(
     return W, P, B, V
 
 
-def generate_kernel(C: Tensor) -> Tensor:
+def build_kernel(A: Tensor, B: Tensor, P: Tensor, C: Tensor, step: Tensor) -> Tensor:
     C = view_as_complex(C)
+    D, R, E = discretize(A, B, P, C, step)
+    state = eye(2 * A.shape[-1], dtype=C.dtype, device=C.device).unsqueeze(dim=-2)
+    pass
 
 
-def linear_discretization(
-    A: Tensor, B: Tensor, C: Tensor, P: Tensor, Q: Tensor, step: Tensor
-) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+def discretize(
+    A: Tensor, B: Tensor, P: Tensor, C: Tensor, step: Tensor
+) -> Tuple[Tensor, Tensor, Tensor]:
+    Q = P.conj_physical()
     D = (2.0 / step - A).reciprocal()
     R = (
-        eye(n=1, dtype=A.dtype, device=A.device)
-        + 2 * einsum("rhn,hn,shn->hrs", Q, D, P).real
+        eye(1, dtype=A.dtype, device=A.device)
+        + 2 * einsum("rhn,hn,shn -> hrs", Q, D, P).real
     )
-    Q_D = rea
+    Q_D = rearrange(Q * D, "rhn->hrn")
+
+    try:
+        R = solve(R, Q_D)
+    except Exception:
+        R = tensor(
+            solve(
+                R.to(Q_D).contiguous().detach().cpu(), Q_D.contiguous().detach().cpu()
+            )
+        ).to(Q_D)
+    R = rearrange(R, "hrn, rhn")
+    E = 2.0 / step + A
+    return D, R, E
 
 
 def build_A_from_DPLR(Lambda: Tensor, P: Tensor, Q: Tensor) -> Tensor:
