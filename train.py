@@ -24,7 +24,7 @@ from config import ConfigParser, TrainingConfig
 from google_speech_commands_dataset_small import SpeechCommandsDatasetSmall
 from mnist_dataset import MNISTDataset
 from speech_commands_dataset import SpeechCommandsDataset
-from s4_model import S4Block
+from s4 import S4Block
 
 
 class S4Network(LightningModule):
@@ -37,12 +37,18 @@ class S4Network(LightningModule):
             self._blocks.append(
                 S4Block(
                     channels=config.channel_dim,
-                    hidden_dim=config.hidden_dim,
+                    n_ssms=config.num_ssms,
+                    state_dim=config.hidden_dim,
                     seq_len=config.seq_len,
-                    pre_norm=config.pre_norm,
-                    norm_type=config.norm,
-                    non_linearity=config.activation,
-                    dropout_prob=config.dropout_prob,
+                    min_dt=config.min_dt,
+                    max_dt=config.max_dt,
+                    clip_B=config.clip_B,
+                    p_kernel_dropout=config.kernel_dropout_prob,
+                    p_block_dropout=config.block_dropout_prob,
+                    norm=config.norm,
+                    prenorm=config.pre_norm,
+                    layer_activation=config.layer_activation,
+                    final_activation=config.final_activation,
                 )
             )
         self._decoder = Linear(in_features=config.channel_dim, out_features=output_dim)

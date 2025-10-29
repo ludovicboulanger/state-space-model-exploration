@@ -23,6 +23,7 @@ class TrainingConfig:
     early_stop_patience: int = 10
     early_stop_threshold: float = 1e-4
     # NN Hyperparameters
+    num_ssms: int = 1
     num_layers: int = 4
     hidden_dim: int = 8
     channel_dim: int = 8
@@ -109,6 +110,10 @@ class ConfigParser:
         )
 
         group = parser.add_argument_group(title="Neural Network Training Parameters")
+        group.add_argument(
+            "--num_ssms",
+            help="The number of independant SSMs to train. Must divide channel_dim",
+        )
         group.add_argument(
             "--num_layers",
             help="the number of horizontally stacked SSM blocks",
