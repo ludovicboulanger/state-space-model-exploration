@@ -26,10 +26,15 @@ class TrainingConfig:
     num_layers: int = 4
     hidden_dim: int = 8
     channel_dim: int = 8
-    dropout_prob: float = 0.0
+    min_dt: float = 1e-4
+    max_dt: float = 1e-1
+    clip_B: float = 2.0
+    kernel_dropout_prob: float = 0.0
+    block_dropout_prob: float = 0.0
     pre_norm: bool = True
-    norm: str = "layer"
-    activation: str = "glu"
+    norm: str = "batch"
+    layer_activation: str = "gelu"
+    final_activation: str = "glu"
     seq_len: int = 16000
 
     def __getitem__(self, key: str) -> Union[str, float, int, bool]:
@@ -117,8 +122,24 @@ class ConfigParser:
             help="The number of vertically stacked SSM layers",
         )
         group.add_argument(
-            "--dropout_prob",
-            help="The dropout probability in SSM blocks",
+            "--min_dt",
+            help="The minimal dt value at initialization",
+        )
+        group.add_argument(
+            "--max_dt",
+            help="The maximal dt value at initialization",
+        )
+        group.add_argument(
+            "--clip_B",
+            help="Whether to clip B values at initialization",
+        )
+        group.add_argument(
+            "--kernel_dropout_prob",
+            help="Dropout applied to kernel elements",
+        )
+        group.add_argument(
+            "--block_dropout_prob",
+            help="Dropout applied after the kernel and layer_activation forward pass",
         )
         group.add_argument(
             "--pre_norm",
@@ -129,14 +150,14 @@ class ConfigParser:
             help="The normalization layer to use. Can be either layer or batch. Default is layer",
         )
         group.add_argument(
-            "--activation",
-            help="The activation functions to use in SSM blocks. Can be sigmoid, gelu, glu. Default is glu",
+            "--layer_activation",
+            help="Activation function applied after kernel forward pass",
+        )
+        group.add_argument(
+            "--final_activation",
+            help="Activation applied at the S4 block output",
         )
         group.add_argument("--seq_len", help="The expected sequence length as input")
-        group.add_argument(
-            "--classification_win_size",
-            help="The size of the classification window to use. The classification will take the last n elements.",
-        )
         return ConfigParser._resolve_args(parser.parse_args())
 
     @staticmethod

@@ -23,4 +23,6 @@ rsync \
   --exclude ".*" \
   --exclude "data" \
   --exclude "training-runs" \
+  --exclude "official" \
+  --exclude "s4_tests.py" \
   -avz -e "ssh -i $keyfile" $SCRIPT_PATH $username@$remotename:$destination

@@ -6,18 +6,22 @@ mkdir -p $CHECKPOINT_DIR/$RUN_ID
 
 source .venv/bin/activate
 
-python3 ./train.py \
+python3 ${SOURCE_DIR}/train.py \
     --save_dir $CHECKPOINT_DIR \
     --run_id $RUN_ID \
-    --data_root ./data/ \
-    --batch_size 5 \
+    --data_root ${SLURM_TMPDIR}/data/ \
+    --batch_size 16 \
     --max_epochs 100 \
     --lr 1e-2 \
-    --lr_delta_threshold 1e-2 \
-    --activation gelu \
+    --lr_delta_threshold 1e-3 \
+    --lr_decay_patience 10 \
+    --layer_activation gelu \
+    --final_activation glu \
     --norm batch \
-    --num_layers 2 \
-    --hidden_dim 8 \
-    --channel_dim 32 \
+    --num_layers 6 \
+    --hidden_dim 64 \
+    --channel_dim 128 \
+    --n_ssm 2 \
+    --min_dt 1e-4 \
+    --max_dt 1e-1 \
     --seq_len 16000 \
-    --dropout_prob 0.1 \
