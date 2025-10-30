@@ -18,9 +18,9 @@ def plot_learning_curves(
         logger_versions = [logger_versions]
     for run, logger_version in zip(runs, logger_versions):
         run_data = _load_data_for_run(run, logger_version)
-        train_acc = run_data["train_accuracy"].dropna()
+        train_acc = run_data["train_accuracy_epoch"].dropna()
         valid_acc = run_data["valid_accuracy"].dropna()
-        train_loss = run_data["train_loss"].dropna()
+        train_loss = run_data["train_loss_epoch"].dropna()
         valid_loss = run_data["valid_loss"].dropna()
 
         fig, ax = subplots(nrows=1, ncols=2)
@@ -48,9 +48,7 @@ def _load_data_for_run(run_dir: Path, logger_version: str) -> DataFrame:
 
 
 if __name__ == "__main__":
-    run_loc = Path(
-        "/Users/ludovic/Workspace/ssm-speech-processing/training-runs/fir/ssm-speech-processing/google-speech-commands-small/08270690"
-    )
+    run_loc = Path(__file__).parent / "training-runs/local/ssm-speech-processing/google_speech_commands/364281" 
     if True:
         plot_learning_curves(run_loc, logger_versions="version_*")
     show()

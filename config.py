@@ -16,12 +16,14 @@ class TrainingConfig:
     # Training Hyperparameters
     max_epochs: int = 100
     batch_size: int = 8
+    accumulate_grad_batches: int = 1
     lr: float = 1e-3
     lr_decay: float = 0.8
     lr_decay_patience: int = 3
     lr_delta_threshold: float = 1e-4
     early_stop_patience: int = 10
     early_stop_threshold: float = 1e-4
+    weight_decay: float = 5e-2
     # NN Hyperparameters
     num_ssms: int = 1
     num_layers: int = 4
@@ -90,6 +92,7 @@ class ConfigParser:
             "--max_epochs", help="the maximum number of epochs to train for"
         )
         group.add_argument("--batch_size", help="The batch size to use")
+        group.add_argument("--accumulate_grad_batches", help="The number of batches to process before performing an optimizer step.")
         group.add_argument("--lr", help="The learning rate to use")
         group.add_argument("--lr_decay", help="The learning rate decay to use")
         group.add_argument(
@@ -107,6 +110,10 @@ class ConfigParser:
         group.add_argument(
             "--early_stop_threshold",
             help="The threshold to consider an improvement in the loss for the EarlyStopping callback",
+        )
+        group.add_argument(
+            "--weight_decay",
+            help="The weight decay used by AdamW.",
         )
 
         group = parser.add_argument_group(title="Neural Network Training Parameters")

@@ -20,7 +20,7 @@ module load python/3.12 cuda cudnn
 virtualenv --no-download ${SLURM_TMPDIR}/.venv
 source ${SLURM_TMPDIR}/.venv/bin/activate
 pip install --no-index --upgrade pip
-pip install --no-index -r ${SOURCE_DIR}/slurm-requirements.txt
+pip install --no-index -r ${SOURCE_DIR}/requirements-slurm.txt
 
 
 # Submit next job BEFORE this one starts (with dependency)

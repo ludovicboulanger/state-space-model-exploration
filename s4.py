@@ -8,6 +8,7 @@ from torch import (
     Tensor,
     arange,
     clamp,
+    clamp_min,
     complex64,
     concatenate,
     diag,
@@ -40,7 +41,7 @@ from torch.nn.functional import softplus
 from torch.linalg import inv, eigh, solve, matrix_power
 from torch.nn import Module, Parameter
 
-from utils import ActivationRegistry, NormRegistry
+from utils import ActivationRegistry, NormRegistry, cauchy_mult
 
 
 class S4Block(Module):
@@ -156,17 +157,20 @@ class S4(Module):
 
     def forward(self, u: Tensor) -> Tensor:
         y = self._kernel_forward_pass(u)
-        y = y + einsum("bhl,h->bhl", u, self._D).unsqueeze(dim=-3)
+        y = y + einsum("blh,h->blh", u, self._D).unsqueeze(dim=-3)
         return y.squeeze()
 
     def _kernel_forward_pass(self, u: Tensor) -> Tensor:
+        u = u.transpose(-1, -2)
         kernel = self._kernel()
         kernel = self._kernel_dropout(kernel)
 
         k_fft = rfft(kernel, n=2 * self._seq_len)
         u_fft = rfft(u, n=2 * self._seq_len)
         y_fft = einsum("bhl,chl->bchl", u_fft, k_fft)
-        return irfft(y_fft, n=2 * self._seq_len)[..., : self._seq_len]
+
+        y = irfft(y_fft, n=2 * self._seq_len)[..., : self._seq_len]
+        return y.transpose(-1, -2)
 
 
 class S4Kernel(Module):
@@ -218,7 +222,7 @@ class S4Kernel(Module):
         v = B.unsqueeze(dim=-3) * C.unsqueeze(dim=-4)
         v = v * dt
 
-        r = self._cauchy_mult_keops(v, z, A)
+        r = cauchy_mult(v, z, A)
         K = r[:-1, :-1, :, :] - r[:-1, -1:, :, :] * r[-1:, :-1, :, :] / (
             1 + r[-1:, -1:, :, :]
         )
@@ -239,38 +243,6 @@ class S4Kernel(Module):
         C_t = C_t - prod
         C_t = C_t[..., : self._state_dim]
         return C_t
-
-    def _cauchy_mult_keops(self, v: Tensor, z: Tensor, w: Tensor) -> Tensor:
-        # TODO: Move this to CUDA when you get it to work
-        def _broadcast_dims(*tensors):
-            max_dim = max([len(tensor.shape) for tensor in tensors])
-            tensors = [
-                tensor.view((1,) * (max_dim - len(tensor.shape)) + tensor.shape)
-                for tensor in tensors
-            ]
-            return tensors
-
-        expr_num = "z * ComplexReal(v) - Real2Complex(Sum(v * w))"
-        expr_denom = "ComplexMult(z-w, z-Conj(w))"
-
-        cauchy_mult = Genred(
-            f"ComplexDivide({expr_num}, {expr_denom})",
-            [
-                "v = Vj(2)",
-                "z = Vi(2)",
-                "w = Vj(2)",
-            ],
-            reduction_op="Sum",
-            axis=1,
-        )
-
-        v, z, w = _broadcast_dims(v, z, w)
-        v = view_as_real(v)
-        z = view_as_real(z)
-        w = view_as_real(w)
-
-        r = 2 * cauchy_mult(v, z, w, backend="GPU" if is_cuda_available() else "CPU")
-        return view_as_complex(r)  # type: ignore
 
     def _discretize_A_and_B(self) -> Tuple[Tensor, Tensor]:
         C = view_as_complex(self._C)
@@ -422,8 +394,8 @@ class S4Kernel(Module):
         inv_dt = rand(size=shape, dtype=self._dtype)
         inv_dt = (nplog(self._max_dt) - nplog(self._min_dt)) * inv_dt
         inv_dt += nplog(self._min_dt)
-        # Softplus initialize like in the official codebase
-        inv_dt = exp(inv_dt) - 1
+        # Inverse Softplus initialize like in the official codebase
+        inv_dt = log(exp(clamp_min(exp(inv_dt), min=1e-4)) - 1)
         return inv_dt
 
     def _register_parameters(
@@ -434,8 +406,8 @@ class S4Kernel(Module):
         # since it may be constructed by a diagonalization)
         assert all(A.real < 1e-4) and all(A.imag <= 0.0)
 
-        self._A_real = Parameter(data=log(-1 * A.real), requires_grad=True)
-        self._A_imag = Parameter(data=-1 * A.imag, requires_grad=True)
+        self._A_real = Parameter(data=log(clamp_min(-1 * A.real, min=1e-4)), requires_grad=True)
+        self._A_imag = Parameter(data=clamp_min(-1 * A.imag, min=1e-4), requires_grad=True)
         self._P = Parameter(data=view_as_real(P), requires_grad=True)
         self._B = Parameter(data=view_as_real(B), requires_grad=True)
         self._C = Parameter(data=view_as_real(C.conj_physical()), requires_grad=True)

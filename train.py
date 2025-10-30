@@ -14,8 +14,8 @@ from lightning.pytorch.callbacks import (
 from lightning.pytorch.loggers import CSVLogger
 from torch import Tensor
 from torch.utils.data import DataLoader
-from torch.optim import Adam
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 from torch.nn import ModuleList, Linear
 from torch.nn.functional import cross_entropy
 from torchmetrics import Accuracy
@@ -70,14 +70,15 @@ class S4Network(LightningModule):
         self.log(
             name="train_loss",
             value=metrics["loss"].item(),
-            on_step=False,
+            on_step=True,
             on_epoch=True,
             sync_dist=True,
+            prog_bar=True
         )
         self.log(
             name="train_accuracy",
             value=metrics["acc"].item(),
-            on_step=False,
+            on_step=True,
             on_epoch=True,
             sync_dist=True,
         )
@@ -91,6 +92,7 @@ class S4Network(LightningModule):
             on_step=False,
             on_epoch=True,
             sync_dist=True,
+            prog_bar=True
         )
         self.log(
             name="valid_accuracy",
@@ -106,18 +108,19 @@ class S4Network(LightningModule):
         nn_parameters = []
         for name, param in self._blocks.named_parameters():
             param_name = name.split(".")[-1]
-            if param_name in ["_L", "_P", "_C", "_B", "_step"]:
+            if param_name in ["A_real", "A_imag", "_P", "_B", "_C", "_dt"]:
                 hippo_parameters.append(param)
             else:
                 nn_parameters.append(param)
 
-        optimizer = Adam(
+        optimizer = AdamW(
             params=[
-                {"params": hippo_parameters, "lr": min(self._config.lr, 1e-3)},
-                {"params": nn_parameters, "lr": self._config.lr},
+                {"params": hippo_parameters, "lr": min(self._config.lr, 1e-3), "weight_decay": 0.0},
+                {"params": nn_parameters, "lr": self._config.lr, "weight_decay": self._config.weight_decay},
             ],
-            weight_decay=0,
         )
+        scheduler = CosineAnnealingLR(optimizer=optimizer, T_max=200000)
+        """
         scheduler = ReduceLROnPlateau(
             optimizer=optimizer,
             mode="min",
@@ -133,6 +136,14 @@ class S4Network(LightningModule):
                 "frequency": 1,
                 "monitor": "valid_loss",
                 "strict": True,
+            },
+        }
+        """
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step"
             },
         }
 
@@ -199,6 +210,8 @@ def train_model(config: TrainingConfig) -> float:
     """
     trainer = Trainer(
         deterministic=True,
+        log_every_n_steps=100,
+        accumulate_grad_batches=config.accumulate_grad_batches,
         devices=_get_device_count_per_node(),
         num_nodes=_get_node_count(),
         strategy=training_strategy,
