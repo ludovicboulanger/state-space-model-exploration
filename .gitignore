@@ -4,4 +4,8 @@
 
 data/
 **/__pycache__/
-training_runs/
+training-runs/
+
+official/
+
+extensions/

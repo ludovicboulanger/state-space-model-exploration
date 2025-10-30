@@ -3,7 +3,7 @@ from typing import List, Union
 
 from matplotlib.pyplot import subplots, show
 from numpy import arange
-from pandas import DataFrame, read_csv
+from pandas import DataFrame, concat, read_csv
 from seaborn import lineplot, set_palette
 
 set_palette("colorblind")
@@ -18,9 +18,9 @@ def plot_learning_curves(
         logger_versions = [logger_versions]
     for run, logger_version in zip(runs, logger_versions):
         run_data = _load_data_for_run(run, logger_version)
-        train_acc = run_data["train_accuracy"].dropna()
+        train_acc = run_data["train_accuracy_epoch"].dropna()
         valid_acc = run_data["valid_accuracy"].dropna()
-        train_loss = run_data["train_loss"].dropna()
+        train_loss = run_data["train_loss_epoch"].dropna()
         valid_loss = run_data["valid_loss"].dropna()
 
         fig, ax = subplots(nrows=1, ncols=2)
@@ -40,13 +40,15 @@ def plot_learning_curves(
 
 
 def _load_data_for_run(run_dir: Path, logger_version: str) -> DataFrame:
-    return read_csv(run_dir / "logs" / logger_version / "metrics.csv")
+    run_dicts = []
+    for logger_dir in (run_dir / "logs").rglob(logger_version):
+        run_dicts.append(read_csv(logger_dir / "metrics.csv"))
+    run_data = concat(run_dicts, axis=0).sort_values("epoch")
+    return run_data
 
 
 if __name__ == "__main__":
-    run_loc = (
-        Path(__file__).parent / "training_runs/fir/ssm-speech-processing/sminst/7947670"
-    )
+    run_loc = Path(__file__).parent / "training-runs/local/ssm-speech-processing/google_speech_commands/364281" 
     if True:
-        plot_learning_curves(run_loc, logger_versions="version_0")
+        plot_learning_curves(run_loc, logger_versions="version_*")
     show()
