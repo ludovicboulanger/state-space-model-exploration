@@ -1,7 +1,8 @@
+from dataclasses import dataclass
 from os import environ
 
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 from lightning import Trainer, LightningModule
 from lightning.pytorch import seed_everything
 from lightning.pytorch.plugins.environments import SLURMEnvironment  # type: ignore
@@ -12,7 +13,7 @@ from lightning.pytorch.callbacks import (
     ModelCheckpoint,
 )
 from lightning.pytorch.loggers import CSVLogger
-from torch import Tensor
+from torch import Tensor, ones_like
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
@@ -25,13 +26,26 @@ from google_speech_commands_dataset_small import SpeechCommandsDatasetSmall
 from mnist_dataset import MNISTDataset
 from speech_commands_dataset import SpeechCommandsDataset
 from s4 import S4Block
+from utils import PDMEncoder, Upsampler
+
+
+@dataclass
+class ForwardPassOutput:
+    logits: Tensor
+    layer_outputs: List[Tensor]
+    loss: Tensor
+    acc: Tensor
 
 
 class S4Network(LightningModule):
     def __init__(self, config: TrainingConfig, output_dim: int) -> None:
         super().__init__()
         self._inference_mode = False
+
         self._encoder = Linear(in_features=1, out_features=config.channel_dim)
+        self._encoder.weight.data = ones_like(self._encoder.weight.data)
+        self._encoder.weight.requires_grad = False
+
         self._blocks = ModuleList([])
         for i in range(config.num_layers):
             self._blocks.append(
@@ -43,9 +57,10 @@ class S4Network(LightningModule):
                     min_dt=config.min_dt,
                     max_dt=config.max_dt,
                     clip_B=config.clip_B,
+                    residual=1 > 0,
                     p_kernel_dropout=config.kernel_dropout_prob,
                     p_block_dropout=config.block_dropout_prob,
-                    norm=config.norm,
+                    norm=config.norm if i > 0 else "none",
                     prenorm=config.pre_norm,
                     layer_activation=config.layer_activation,
                     final_activation=config.final_activation,
@@ -55,21 +70,11 @@ class S4Network(LightningModule):
         self._accuracy = Accuracy(task="multiclass", num_classes=output_dim)
         self._config = config
 
-    @property
-    def inference_mode(self) -> bool:
-        return self._inference_mode
-
-    @inference_mode.setter
-    def inference_mode(self, mode: bool) -> None:
-        self._inference_mode = mode
-        for block in self._blocks:
-            block.inference_mode = mode  # type: ignore
-
     def training_step(self, batch: Tuple[Tensor, ...]) -> Tensor:
-        _, metrics = self._forward_pass(batch)
+        out = self._forward_pass(batch)
         self.log(
             name="train_loss",
-            value=metrics["loss"].item(),
+            value=out.loss.item(),
             on_step=True,
             on_epoch=True,
             sync_dist=True,
@@ -77,18 +82,18 @@ class S4Network(LightningModule):
         )
         self.log(
             name="train_accuracy",
-            value=metrics["acc"].item(),
+            value=out.acc.item(),
             on_step=True,
             on_epoch=True,
             sync_dist=True,
         )
-        return metrics["loss"]
+        return out.loss
 
     def validation_step(self, batch: Tuple[Tensor, ...]) -> Tensor:
-        _, metrics = self._forward_pass(batch)
+        out = self._forward_pass(batch)
         self.log(
             name="valid_loss",
-            value=metrics["loss"].item(),
+            value=out.loss.item(),
             on_step=False,
             on_epoch=True,
             sync_dist=True,
@@ -96,12 +101,24 @@ class S4Network(LightningModule):
         )
         self.log(
             name="valid_accuracy",
-            value=metrics["acc"].item(),
+            value=out.acc.item(),
             on_step=False,
             on_epoch=True,
             sync_dist=True,
         )
-        return metrics["loss"]
+        return out.loss
+
+    def test_step(self, batch: Tuple[Tensor, ...]) -> Tensor:
+        out = self._forward_pass(batch)
+        self.log(
+            name="test_accuracy",
+            value=out.acc.item(),
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
+        return out.loss
 
     def configure_optimizers(self) -> Dict[str, Any]:  # type: ignore
         hippo_parameters = []
@@ -120,25 +137,6 @@ class S4Network(LightningModule):
             ],
         )
         scheduler = CosineAnnealingLR(optimizer=optimizer, T_max=200000)
-        """
-        scheduler = ReduceLROnPlateau(
-            optimizer=optimizer,
-            mode="min",
-            factor=config.lr_decay,
-            patience=config.lr_decay_patience,
-            threshold=config.lr_delta_threshold,
-        )
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "epoch",
-                "frequency": 1,
-                "monitor": "valid_loss",
-                "strict": True,
-            },
-        }
-        """
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
@@ -147,26 +145,34 @@ class S4Network(LightningModule):
             },
         }
 
+    def update_sampling_rate(self, sampling_factor: int) -> None:
+        for block in self._blocks:
+            block._s4_layer._kernel.scale_factor = sampling_factor #type: ignore
+
     def _forward_pass(
         self, batch: Tuple[Tensor, ...]
-    ) -> Tuple[Tensor, Dict[str, Tensor]]:
+    ) -> ForwardPassOutput:
         x, y = batch
+        layer_outputs = []
 
         y_hat = self._encoder(x)
         for block in self._blocks:
-            y_hat = block(y_hat)
-        y_hat_no_agg = y_hat
+            y_hat, layer_out = block(y_hat)
+            layer_outputs.append(layer_out)
         y_hat = y_hat.mean(dim=1)
         logits = self._decoder(y_hat)
 
         loss = cross_entropy(logits, y)
         acc = self._accuracy(logits.argmax(dim=-1), y)
-        return y_hat_no_agg, {"loss": loss, "acc": acc}
+        return ForwardPassOutput(logits=logits, layer_outputs=layer_outputs, loss=loss, acc=acc)
 
 
 def train_model(config: TrainingConfig) -> float:
     (Path(config.save_dir) / config.run_id).mkdir(parents=True, exist_ok=True)
     config.to_json(Path(config.save_dir) / config.run_id / "training_config.json")
+
+    if config.debug:
+        _wait_for_debugger()
 
     if _get_node_count() > 1 or _get_device_count_per_node() > 1:
         use_ddp = True
@@ -181,11 +187,15 @@ def train_model(config: TrainingConfig) -> float:
         root=config.data_root,
         download=True,
         subset="training",
+        data_encoding=config.data_encoding,
+        pdm_factor=config.pdm_factor
     )
     validation_dataset = SpeechCommandsDatasetSmall(
         root=config.data_root,
         download=True,
         subset="validation",
+        data_encoding=config.data_encoding,
+        pdm_factor=config.pdm_factor
     )
     training_loader = DataLoader(
         training_dataset,
@@ -201,13 +211,6 @@ def train_model(config: TrainingConfig) -> float:
         num_workers=_get_cpu_count_per_node(),
         pin_memory=use_ddp,
     )
-    """
-    EarlyStopping(
-        monitor="valid_loss",
-        patience=config.early_stop_patience,
-        min_delta=config.early_stop_threshold,
-    ),
-    """
     trainer = Trainer(
         deterministic=True,
         log_every_n_steps=100,
@@ -259,6 +262,39 @@ def train_model(config: TrainingConfig) -> float:
     return trainer.callback_metrics.get("valid_loss")  # type: ignore
 
 
+def test_model(config: TrainingConfig) -> float:
+    pdm_factor = 8
+    config.seq_len = pdm_factor * config.seq_len
+    testing_dataset = SpeechCommandsDatasetSmall(
+        root=config.data_root,
+        download=True,
+        subset="validation",
+        data_encoding="pdm",
+        pdm_factor=pdm_factor
+    )
+    testing_loader = DataLoader(
+        testing_dataset,
+        batch_size=config.batch_size,
+        shuffle=True,
+        num_workers=_get_cpu_count_per_node(),
+        pin_memory=False
+    )
+    trainer = Trainer(
+        deterministic=True,
+        log_every_n_steps=100,
+        logger=CSVLogger(save_dir=Path(config.save_dir) / config.run_id, name="logs", version=f"test-{pdm_factor}"),
+    )
+
+    ssm = S4Network(config, output_dim=testing_dataset.num_labels)
+    ssm.update_sampling_rate(pdm_factor)
+
+    ckpt_file = Path(config.save_dir) / config.run_id / "best_checkpoint.ckpt"
+
+    trainer.test(model=ssm, dataloaders=testing_loader, ckpt_path=ckpt_file)
+
+    return trainer.callback_metrics.get("test_accuracy")  # type: ignore
+
+
 def _get_node_count() -> int:
     num_nodes = environ.get("SLURM_NNODES", 1)
     return int(num_nodes)
@@ -277,7 +313,17 @@ def _get_cpu_count_per_node() -> int:
     return int(cpus_per_task)
 
 
-if __name__ == "__main__":
+def _wait_for_debugger() -> None:
+    from debugpy import listen, wait_for_client, breakpoint
+
+    print("Waiting for debugger to attach...")
+    listen(5678)
+    wait_for_client()
+    print("Debugger attached!")
+    breakpoint()
+
+
+def train() -> None:
     from torch.cuda import device_count
 
     print(f"RANK: {environ.get('SLURM_PROCID', 'N/A')}")
@@ -287,3 +333,12 @@ if __name__ == "__main__":
     seed_everything(3221)
     config = ConfigParser.from_cli_args()
     train_model(config=config)
+
+def test() -> None:
+    run_to_test = Path("/home/ludovic/workspace/ssm-speech-processing/training-runs/local/ssm-speech-processing/google_speech_commands/264405")
+    config = TrainingConfig.from_json(run_to_test / "training_config.json")
+    test_model(config)
+
+
+if __name__ == "__main__":
+    train()

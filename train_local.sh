@@ -1,4 +1,5 @@
-RUN_ID=364281 
+RUN_ID=727401
+   
 CHECKPOINT_DIR=./training-runs/local/ssm-speech-processing/google_speech_commands
 DATASET_DIR=./data/SpeechCommands/speech_commands_v0.02
 
@@ -18,7 +19,7 @@ python3 train.py \
     --lr_decay_patience 10 \
     --layer_activation gelu \
     --final_activation glu \
-    --norm batch \
+    --norm group \
     --num_layers 6 \
     --hidden_dim 64 \
     --channel_dim 128 \

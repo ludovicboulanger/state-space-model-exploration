@@ -34,9 +34,8 @@ from torch import (
     where,
     zeros,
 )
-from torch.cuda import is_available as is_cuda_available
 from torch.fft import rfft, irfft
-from torch.nn import Dropout, Identity, GLU, Sequential, Linear, BatchNorm1d
+from torch.nn import Dropout, Identity, GLU, Sequential, Linear, BatchNorm1d, GroupNorm
 from torch.nn.functional import softplus
 from torch.linalg import inv, eigh, solve, matrix_power
 from torch.nn import Module, Parameter
@@ -55,6 +54,7 @@ class S4Block(Module):
         max_dt: float,
         tie_dt: bool = True,
         clip_B: Optional[float] = 2.0,
+        residual: bool = True,
         dtype: TorchType = float32,
         p_kernel_dropout: float = 0.0,
         p_block_dropout: float = 0.0,
@@ -73,6 +73,7 @@ class S4Block(Module):
             max_dt,
             tie_dt,
             clip_B,
+            residual,
             dtype,
             p_kernel_dropout,
         )
@@ -96,25 +97,28 @@ class S4Block(Module):
             Linear(in_features=channels, out_features=_out_features),
             output_norm,
         )
+        self._residual = residual
 
-    def forward(self, u: Tensor) -> Tensor:
+    def forward(self, u: Tensor) -> Tuple[Tensor, Tensor]:
         if self._prenorm:
             u = self._apply_normalization(u)
 
         y = self._s4_layer(u)
+        layer_output = y
         y = self._layer_activation(y)
         y = self._block_dropout(y)
         y = self._output_module(y)
 
-        y = y + u
+        if self._residual:
+            y = y + u
 
         if not self._prenorm:
-            y = self._norm(y)
+            y = self._apply_normalization(y)
 
-        return y
+        return y, layer_output
 
     def _apply_normalization(self, u: Tensor) -> Tensor:
-        if isinstance(self._norm, BatchNorm1d):
+        if isinstance(self._norm, BatchNorm1d) or isinstance(self._norm, GroupNorm):
             y = u.transpose(dim0=-1, dim1=-2)
             y = self._norm(y)
             y = y.transpose(dim0=-1, dim1=-2)
@@ -134,6 +138,7 @@ class S4(Module):
         max_dt: float,
         tie_dt: bool = True,
         clip_B: Optional[float] = 2.0,
+        use_D: bool = True,
         dtype: TorchType = float32,
         p_kernel_dropout: float = 0.0,
     ) -> None:
@@ -150,15 +155,18 @@ class S4(Module):
             dtype,
         )
         self._seq_len = seq_len
-        self._D = Parameter(data=randn(size=(channels,)), requires_grad=True)
+        if use_D:
+            self._D = Parameter(data=randn(size=(channels,)), requires_grad=True)
+        else:
+            self._D = Parameter(data=zeros(size=(channels,)), requires_grad=False)
         self._kernel_dropout = (
             Dropout(p=p_kernel_dropout) if p_kernel_dropout > 0.0 else Identity()
         )
 
     def forward(self, u: Tensor) -> Tensor:
-        y = self._kernel_forward_pass(u)
-        y = y + einsum("blh,h->blh", u, self._D).unsqueeze(dim=-3)
-        return y.squeeze()
+        y = self._kernel_forward_pass(u).reshape(u.shape)
+        y = y + einsum("blh,h->blh", u, self._D)
+        return y
 
     def _kernel_forward_pass(self, u: Tensor) -> Tensor:
         u = u.transpose(-1, -2)
@@ -205,6 +213,15 @@ class S4Kernel(Module):
 
         # Assume Conjugate symmetry in the parameters
         self._state_dim = self._state_dim // 2
+        self._scale_factor = 1.0
+
+    @property
+    def scale_factor(self) -> float:
+        return self._scale_factor
+
+    @scale_factor.setter
+    def scale_factor(self, scale_factor: float) -> None:
+        self._scale_factor = scale_factor
 
     def forward(self) -> Tensor:
         """
@@ -406,6 +423,7 @@ class S4Kernel(Module):
         # since it may be constructed by a diagonalization)
         assert all(A.real < 1e-4) and all(A.imag <= 0.0)
 
+        # The transformations on the A parameter and dt parameter come from the official repo
         self._A_real = Parameter(data=log(clamp_min(-1 * A.real, min=1e-4)), requires_grad=True)
         self._A_imag = Parameter(data=clamp_min(-1 * A.imag, min=1e-4), requires_grad=True)
         self._P = Parameter(data=view_as_real(P), requires_grad=True)
@@ -417,7 +435,7 @@ class S4Kernel(Module):
         A = -1 * exp(self._A_real) - 1j * self._A_imag
         B = view_as_complex(self._B)
         C = view_as_complex(self._C)
-        dt = softplus(self._dt)
+        dt = softplus(self._dt) / self._scale_factor
         P = view_as_complex(self._P)
         Q = P.conj_physical()
 

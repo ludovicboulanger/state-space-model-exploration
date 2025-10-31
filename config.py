@@ -13,6 +13,7 @@ class TrainingConfig:
     data_root: str = str(Path(__file__).parent / "data")
     run_id: str = "test-run-id"
     smoke_test: bool = False
+    debug: bool = False
     # Training Hyperparameters
     max_epochs: int = 100
     batch_size: int = 8
@@ -24,6 +25,9 @@ class TrainingConfig:
     early_stop_patience: int = 10
     early_stop_threshold: float = 1e-4
     weight_decay: float = 5e-2
+    # Data Hyperparameters
+    data_encoding: str = "pcm"
+    pdm_factor: int = 64
     # NN Hyperparameters
     num_ssms: int = 1
     num_layers: int = 4
@@ -86,6 +90,12 @@ class ConfigParser:
             help="Whether to run a quick smoke test or not",
             action="store_true",
         )
+        group.add_argument(
+            "--debug",
+            help="Whether to start in debug mode or not. Only works on VSCode",
+            action="store_true",
+        )
+
 
         group = parser.add_argument_group(title="Training Hyperparameters")
         group.add_argument(
@@ -114,6 +124,16 @@ class ConfigParser:
         group.add_argument(
             "--weight_decay",
             help="The weight decay used by AdamW.",
+        )
+
+        group = parser.add_argument_group(title="Data Hyperparameters")
+        group.add_argument(
+            "--data_encoding",
+            help="The encoding to use for the speech data. Can be either PDM or PCM",
+        )
+        group.add_argument(
+            "--pdm_factor",
+            help="If data_encoding = \"pdm\", the factor to use for upsampling",
         )
 
         group = parser.add_argument_group(title="Neural Network Training Parameters")
