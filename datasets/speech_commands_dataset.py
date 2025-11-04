@@ -2,11 +2,13 @@ from pathlib import Path
 from typing import Dict, Tuple
 from torch import Tensor, tensor
 from torch.nn.functional import pad
-from torch.utils.data import Dataset
 from torchaudio.datasets import SPEECHCOMMANDS
 
+from datasets.sequence_dataset import SequenceDataset
+from utils.encoders import PDMEncoder
 
-class SpeechCommandsDataset(Dataset):
+
+class SpeechCommandsDataset(SequenceDataset):
     def __init__(
         self,
         root: str | Path,
@@ -14,10 +16,14 @@ class SpeechCommandsDataset(Dataset):
         folder_in_archive: str = "SpeechCommands",
         download: bool = False,
         subset: str = "training",
+        data_encoding: str = "pcm",
+        pdm_factor: int = 64,
     ) -> None:
         super(SpeechCommandsDataset, self).__init__()
         self._dataset = SPEECHCOMMANDS(root, url, folder_in_archive, download, subset)
         self._subset = subset
+        self._data_encoding = data_encoding
+        self._pdm_factor = pdm_factor
 
     @property
     def label_to_id(self) -> Dict[str, int]:
@@ -71,6 +77,11 @@ class SpeechCommandsDataset(Dataset):
         data, _, label, _, _ = self._dataset[n]
         label_as_tensor = tensor(self.label_to_id[label]).long()
         data = self._pad_data_if_needed(data)
+
+        if self._data_encoding == "pdm":
+            data = PDMEncoder(pdm_factor=self._pdm_factor)(data)
+            data = 2 * data - 1
+
         return data.transpose(dim0=-1, dim1=-2), label_as_tensor
 
     def __len__(self) -> int:

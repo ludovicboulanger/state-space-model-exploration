@@ -2,7 +2,6 @@ from typing import Dict, Optional, Tuple
 from einops import rearrange
 
 from numpy import log as nplog
-from pykeops.torch import Genred
 from torch import (
     all,
     Tensor,
@@ -40,13 +39,15 @@ from torch.nn.functional import softplus
 from torch.linalg import inv, eigh, solve, matrix_power
 from torch.nn import Module, Parameter
 
-from utils import ActivationRegistry, NormRegistry, cauchy_mult
+from utils.registries import ActivationRegistry, NormRegistry
+from utils.computations import cauchy_mult
 
 
 class S4Block(Module):
     def __init__(
         self,
-        channels: int,
+        in_channels: int,
+        out_channels: int,
         n_ssms: int,
         state_dim: int,
         seq_len: int,
@@ -65,7 +66,7 @@ class S4Block(Module):
     ) -> None:
         super().__init__()
         self._s4_layer = S4(
-            channels,
+            in_channels,
             n_ssms,
             state_dim,
             seq_len,
@@ -83,21 +84,31 @@ class S4Block(Module):
             self._block_dropout = Identity()
 
         self._prenorm = prenorm
-        self._norm = NormRegistry.instantiate(norm=norm, channels=channels)
+        self._norm = NormRegistry.instantiate(norm=norm, channels=in_channels)
 
-        self._layer_activation = ActivationRegistry.instantiate(
-            activation=layer_activation
-        )
+        self._layer_activation = ActivationRegistry.instantiate(activation=layer_activation)
         output_norm = ActivationRegistry.instantiate(activation=final_activation)
         if isinstance(output_norm, GLU):
-            _out_features = 2 * channels
+            _out_features = 2 * out_channels
         else:
-            _out_features = channels
+            _out_features = out_channels
         self._output_module = Sequential(
-            Linear(in_features=channels, out_features=_out_features),
+            Linear(in_features=in_channels, out_features=_out_features),
             output_norm,
         )
         self._residual = residual
+        if residual and out_channels != in_channels:
+            self._residual_connection = Linear(in_features=in_channels, out_features=out_channels)
+        elif residual and out_channels == in_channels:
+            self._residual_connection = Identity()
+
+    @property
+    def seq_len(self) -> int:
+        return self._s4_layer.seq_len
+
+    @seq_len.setter
+    def seq_len(self, seq_len: int) -> None:
+        self._s4_layer.seq_len = seq_len
 
     def forward(self, u: Tensor) -> Tuple[Tensor, Tensor]:
         if self._prenorm:
@@ -110,7 +121,7 @@ class S4Block(Module):
         y = self._output_module(y)
 
         if self._residual:
-            y = y + u
+            y = y + self._residual_connection(u)
 
         if not self._prenorm:
             y = self._apply_normalization(y)
@@ -159,9 +170,16 @@ class S4(Module):
             self._D = Parameter(data=randn(size=(channels,)), requires_grad=True)
         else:
             self._D = Parameter(data=zeros(size=(channels,)), requires_grad=False)
-        self._kernel_dropout = (
-            Dropout(p=p_kernel_dropout) if p_kernel_dropout > 0.0 else Identity()
-        )
+        self._kernel_dropout = Dropout(p=p_kernel_dropout) if p_kernel_dropout > 0.0 else Identity()
+
+    @property
+    def seq_len(self) -> int:
+        return self._kernel.seq_len
+
+    @seq_len.setter
+    def seq_len(self, seq_len: int) -> None:
+        self._seq_len = seq_len
+        self._kernel.seq_len = seq_len
 
     def forward(self, u: Tensor) -> Tensor:
         y = self._kernel_forward_pass(u).reshape(u.shape)
@@ -196,7 +214,13 @@ class S4Kernel(Module):
     ) -> None:
         super(S4Kernel, self).__init__()
         self._channels = channels
-        self._n_ssms = n_ssms
+        if n_ssms == -1:
+            self._n_ssms = channels
+        else:
+            self._n_ssms = n_ssms
+        assert self._channels % self._n_ssms == 0, (
+            f"Error: n_ssms does not divide channels. n_ssms = {self._n_ssms} ; channels = {self._channels}"
+        )
         self._state_dim = state_dim
         self._seq_len = seq_len
         self._min_dt = min_dt
@@ -214,6 +238,14 @@ class S4Kernel(Module):
         # Assume Conjugate symmetry in the parameters
         self._state_dim = self._state_dim // 2
         self._scale_factor = 1.0
+
+    @property
+    def seq_len(self) -> int:
+        return self._seq_len
+
+    @seq_len.setter
+    def seq_len(self, seq_len: int) -> None:
+        self._seq_len = seq_len
 
     @property
     def scale_factor(self) -> float:
@@ -240,9 +272,7 @@ class S4Kernel(Module):
         v = v * dt
 
         r = cauchy_mult(v, z, A)
-        K = r[:-1, :-1, :, :] - r[:-1, -1:, :, :] * r[-1:, :-1, :, :] / (
-            1 + r[-1:, -1:, :, :]
-        )
+        K = r[:-1, :-1, :, :] - r[:-1, -1:, :, :] * r[-1:, :-1, :, :] / (1 + r[-1:, -1:, :, :])
         K = K * 2 / (1 + omega)
         kernel = irfft(K, n=self._seq_len)
 
@@ -264,9 +294,7 @@ class S4Kernel(Module):
     def _discretize_A_and_B(self) -> Tuple[Tensor, Tensor]:
         C = view_as_complex(self._C)
         step_parameters = self._compute_linear_step_terms()
-        state = eye(2 * self._state_dim, dtype=C.dtype, device=C.device).unsqueeze(
-            dim=-2
-        )
+        state = eye(2 * self._state_dim, dtype=C.dtype, device=C.device).unsqueeze(dim=-2)
         A_bar = self._compute_new_state(step_parameters, x=state)
         A_bar = rearrange(A_bar, "n h m -> h m n")
         u = C.new_ones(size=(self._channels,))
@@ -292,9 +320,7 @@ class S4Kernel(Module):
         if u is None:
             u = zeros(size=(self._channels,), dtype=C.dtype, device=C.device)
         if x is None:
-            x = zeros(
-                size=(self._channels, self._state_dim), dtype=C.dtype, device=C.device
-            )
+            x = zeros(size=(self._channels, self._state_dim), dtype=C.dtype, device=C.device)
 
         if x.shape[-1] == self._state_dim:
 
@@ -305,10 +331,7 @@ class S4Kernel(Module):
                 return einsum("rhn,rhm,...hm -> ...hn", p, x, y)[..., : self._state_dim]
         else:
             assert x.shape[-1] == 2 * self._state_dim
-            step_parameters = {
-                p: concatenate((v, v.conj_physical()), dim=-1)
-                for p, v in step_parameters.items()
-            }
+            step_parameters = {p: concatenate((v, v.conj_physical()), dim=-1) for p, v in step_parameters.items()}
 
             def contract_fn(p: Tensor, x: Tensor, y: Tensor) -> Tensor:
                 return einsum("rhn,rhm,...hm -> ...hn", p, x, y)
@@ -415,9 +438,7 @@ class S4Kernel(Module):
         inv_dt = log(exp(clamp_min(exp(inv_dt), min=1e-4)) - 1)
         return inv_dt
 
-    def _register_parameters(
-        self, A: Tensor, P: Tensor, B: Tensor, C: Tensor, dt: Tensor
-    ) -> None:
+    def _register_parameters(self, A: Tensor, P: Tensor, B: Tensor, C: Tensor, dt: Tensor) -> None:
         # Check that diagonal part has negative real and imag part
         # (allow some tolerance for numerical precision on real part
         # since it may be constructed by a diagonalization)

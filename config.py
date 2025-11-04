@@ -11,6 +11,8 @@ class TrainingConfig:
     # Persistence
     save_dir: str = str(Path(__file__).parent / "training-runs")
     data_root: str = str(Path(__file__).parent / "data")
+    task: str = "classficiation"
+    dataset: str = "gcs-sm"
     run_id: str = "test-run-id"
     smoke_test: bool = False
     debug: bool = False
@@ -29,6 +31,7 @@ class TrainingConfig:
     data_encoding: str = "pcm"
     pdm_factor: int = 64
     # NN Hyperparameters
+    unet: bool = False
     num_ssms: int = 1
     num_layers: int = 4
     hidden_dim: int = 8
@@ -76,14 +79,22 @@ class ConfigParser:
         parser = ArgumentParser()
 
         group = parser.add_argument_group(title="Persistence Parameters")
-        group.add_argument(
-            "--save_dir", required=True, help="Where to save the run data"
-        )
+        group.add_argument("--save_dir", required=True, help="Where to save the run data")
         group.add_argument("--run_id", help="The id to use for the current run")
         group.add_argument(
             "--data_root",
             required=True,
             help="The directory where the data is stored",
+        )
+        group.add_argument(
+            "--task",
+            required=True,
+            help="The task. Either classification or regression",
+        )
+        group.add_argument(
+            "--dataset",
+            required=True,
+            help="The dataset to use.",
         )
         group.add_argument(
             "--smoke_test",
@@ -96,13 +107,12 @@ class ConfigParser:
             action="store_true",
         )
 
-
         group = parser.add_argument_group(title="Training Hyperparameters")
-        group.add_argument(
-            "--max_epochs", help="the maximum number of epochs to train for"
-        )
+        group.add_argument("--max_epochs", help="the maximum number of epochs to train for")
         group.add_argument("--batch_size", help="The batch size to use")
-        group.add_argument("--accumulate_grad_batches", help="The number of batches to process before performing an optimizer step.")
+        group.add_argument(
+            "--accumulate_grad_batches", help="The number of batches to process before performing an optimizer step."
+        )
         group.add_argument("--lr", help="The learning rate to use")
         group.add_argument("--lr_decay", help="The learning rate decay to use")
         group.add_argument(
@@ -133,10 +143,15 @@ class ConfigParser:
         )
         group.add_argument(
             "--pdm_factor",
-            help="If data_encoding = \"pdm\", the factor to use for upsampling",
+            help='If data_encoding = "pdm", the factor to use for upsampling',
         )
 
         group = parser.add_argument_group(title="Neural Network Training Parameters")
+        group.add_argument(
+            "--unet",
+            action="store_true",
+            help="Whether to use a U-Net like architecture.",
+        )
         group.add_argument(
             "--num_ssms",
             help="The number of independant SSMs to train. Must divide channel_dim",

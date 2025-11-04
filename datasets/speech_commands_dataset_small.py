@@ -1,10 +1,9 @@
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 from numpy import array, ndarray
-from torch import Tensor, tensor
+from torch import Tensor
 
-from speech_commands_dataset import SpeechCommandsDataset
-from utils import PDMEncoder
+from datasets.speech_commands_dataset import SpeechCommandsDataset
 
 
 class SpeechCommandsDatasetSmall(SpeechCommandsDataset):
@@ -16,7 +15,7 @@ class SpeechCommandsDatasetSmall(SpeechCommandsDataset):
         download: bool = False,
         subset: str = "training",
         data_encoding: str = "pcm",
-        pdm_factor: int = 64
+        pdm_factor: int = 64,
     ) -> None:
         super(SpeechCommandsDatasetSmall, self).__init__(
             root=root,
@@ -44,23 +43,8 @@ class SpeechCommandsDatasetSmall(SpeechCommandsDataset):
             "yes": 9,
         }
 
-    @property
-    def id_to_label(self) -> Dict[int, str]:
-        return {v: k for k, v in self.label_to_id.items()}
-
-    @property
-    def num_labels(self) -> int:
-        return len(list(self.id_to_label.keys()))
-
     def __getitem__(self, n: int) -> Tuple[Tensor, Tensor]:
-        data, _, label, _, _ = self._dataset[self._indices[n]]
-        label_as_tensor = tensor(self.label_to_id[label]).long()
-        data = self._pad_data_if_needed(data)
-
-        if self._data_encoding == "pdm":
-            data = PDMEncoder(pdm_factor=self._pdm_factor)(data)
-            data = 2 * data - 1
-        return data.transpose(dim0=-1, dim1=-2), label_as_tensor
+        return super()[self._indices[n]]
 
     def __len__(self) -> int:
         return len(self._indices)

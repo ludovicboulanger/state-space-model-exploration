@@ -1,5 +1,5 @@
 from torch import allclose, rand, view_as_complex
-from s4 import S4Kernel, S4
+from models.s4 import S4Kernel, S4
 from official.models.s4.s4 import FFTConv, SSMKernelDPLR
 
 

@@ -1,170 +1,21 @@
-from dataclasses import dataclass
 from os import environ
 
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
-from lightning import Trainer, LightningModule
+from lightning import Trainer
 from lightning.pytorch import seed_everything
 from lightning.pytorch.plugins.environments import SLURMEnvironment  # type: ignore
 from lightning.pytorch.utilities.model_summary.model_summary import ModelSummary
 from lightning.pytorch.callbacks import (
-    EarlyStopping,
     LearningRateMonitor,
     ModelCheckpoint,
 )
 from lightning.pytorch.loggers import CSVLogger
-from torch import Tensor, ones_like
 from torch.utils.data import DataLoader
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
-from torch.nn import ModuleList, Linear
-from torch.nn.functional import cross_entropy
-from torchmetrics import Accuracy
 
 from config import ConfigParser, TrainingConfig
-from google_speech_commands_dataset_small import SpeechCommandsDatasetSmall
-from mnist_dataset import MNISTDataset
-from speech_commands_dataset import SpeechCommandsDataset
-from s4 import S4Block
-from utils import PDMEncoder, Upsampler
-
-
-@dataclass
-class ForwardPassOutput:
-    logits: Tensor
-    layer_outputs: List[Tensor]
-    loss: Tensor
-    acc: Tensor
-
-
-class S4Network(LightningModule):
-    def __init__(self, config: TrainingConfig, output_dim: int) -> None:
-        super().__init__()
-        self._inference_mode = False
-
-        self._encoder = Linear(in_features=1, out_features=config.channel_dim)
-        self._encoder.weight.data = ones_like(self._encoder.weight.data)
-        self._encoder.weight.requires_grad = False
-
-        self._blocks = ModuleList([])
-        for i in range(config.num_layers):
-            self._blocks.append(
-                S4Block(
-                    channels=config.channel_dim,
-                    n_ssms=config.num_ssms,
-                    state_dim=config.hidden_dim,
-                    seq_len=config.seq_len,
-                    min_dt=config.min_dt,
-                    max_dt=config.max_dt,
-                    clip_B=config.clip_B,
-                    residual=1 > 0,
-                    p_kernel_dropout=config.kernel_dropout_prob,
-                    p_block_dropout=config.block_dropout_prob,
-                    norm=config.norm if i > 0 else "none",
-                    prenorm=config.pre_norm,
-                    layer_activation=config.layer_activation,
-                    final_activation=config.final_activation,
-                )
-            )
-        self._decoder = Linear(in_features=config.channel_dim, out_features=output_dim)
-        self._accuracy = Accuracy(task="multiclass", num_classes=output_dim)
-        self._config = config
-
-    def training_step(self, batch: Tuple[Tensor, ...]) -> Tensor:
-        out = self._forward_pass(batch)
-        self.log(
-            name="train_loss",
-            value=out.loss.item(),
-            on_step=True,
-            on_epoch=True,
-            sync_dist=True,
-            prog_bar=True
-        )
-        self.log(
-            name="train_accuracy",
-            value=out.acc.item(),
-            on_step=True,
-            on_epoch=True,
-            sync_dist=True,
-        )
-        return out.loss
-
-    def validation_step(self, batch: Tuple[Tensor, ...]) -> Tensor:
-        out = self._forward_pass(batch)
-        self.log(
-            name="valid_loss",
-            value=out.loss.item(),
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-            prog_bar=True
-        )
-        self.log(
-            name="valid_accuracy",
-            value=out.acc.item(),
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-        )
-        return out.loss
-
-    def test_step(self, batch: Tuple[Tensor, ...]) -> Tensor:
-        out = self._forward_pass(batch)
-        self.log(
-            name="test_accuracy",
-            value=out.acc.item(),
-            on_step=True,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
-        )
-        return out.loss
-
-    def configure_optimizers(self) -> Dict[str, Any]:  # type: ignore
-        hippo_parameters = []
-        nn_parameters = []
-        for name, param in self._blocks.named_parameters():
-            param_name = name.split(".")[-1]
-            if param_name in ["A_real", "A_imag", "_P", "_B", "_C", "_dt"]:
-                hippo_parameters.append(param)
-            else:
-                nn_parameters.append(param)
-
-        optimizer = AdamW(
-            params=[
-                {"params": hippo_parameters, "lr": min(self._config.lr, 1e-3), "weight_decay": 0.0},
-                {"params": nn_parameters, "lr": self._config.lr, "weight_decay": self._config.weight_decay},
-            ],
-        )
-        scheduler = CosineAnnealingLR(optimizer=optimizer, T_max=200000)
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "step"
-            },
-        }
-
-    def update_sampling_rate(self, sampling_factor: int) -> None:
-        for block in self._blocks:
-            block._s4_layer._kernel.scale_factor = sampling_factor #type: ignore
-
-    def _forward_pass(
-        self, batch: Tuple[Tensor, ...]
-    ) -> ForwardPassOutput:
-        x, y = batch
-        layer_outputs = []
-
-        y_hat = self._encoder(x)
-        for block in self._blocks:
-            y_hat, layer_out = block(y_hat)
-            layer_outputs.append(layer_out)
-        y_hat = y_hat.mean(dim=1)
-        logits = self._decoder(y_hat)
-
-        loss = cross_entropy(logits, y)
-        acc = self._accuracy(logits.argmax(dim=-1), y)
-        return ForwardPassOutput(logits=logits, layer_outputs=layer_outputs, loss=loss, acc=acc)
+from modules.classification_module import ClassificationModule
+from modules.regression_module import RegressionModule
+from utils.registries import DatasetRegistry
 
 
 def train_model(config: TrainingConfig) -> float:
@@ -183,20 +34,9 @@ def train_model(config: TrainingConfig) -> float:
         training_strategy = "auto"
         plugins = None
 
-    training_dataset = SpeechCommandsDatasetSmall(
-        root=config.data_root,
-        download=True,
-        subset="training",
-        data_encoding=config.data_encoding,
-        pdm_factor=config.pdm_factor
-    )
-    validation_dataset = SpeechCommandsDatasetSmall(
-        root=config.data_root,
-        download=True,
-        subset="validation",
-        data_encoding=config.data_encoding,
-        pdm_factor=config.pdm_factor
-    )
+    training_dataset = DatasetRegistry.instantiate(config, "training")
+    validation_dataset = DatasetRegistry.instantiate(config, "validation")
+
     training_loader = DataLoader(
         training_dataset,
         batch_size=config.batch_size,
@@ -206,7 +46,7 @@ def train_model(config: TrainingConfig) -> float:
     )
     validation_loader = DataLoader(
         validation_dataset,
-        batch_size=config.batch_size,
+        batch_size=1 if config.task == "regression" else config.batch_size,
         shuffle=False,
         num_workers=_get_cpu_count_per_node(),
         pin_memory=use_ddp,
@@ -242,11 +82,12 @@ def train_model(config: TrainingConfig) -> float:
         ],
     )
 
-    ssm = S4Network(config, output_dim=training_dataset.num_labels)
+    if config.task == "classification":
+        ssm = ClassificationModule(config, training_dataset.num_labels)
+    else:
+        ssm = RegressionModule(config, output_dim=training_dataset.num_labels)
     summary = ModelSummary(ssm, max_depth=1000)
-    with open(
-        Path(config.save_dir) / config.run_id / "model_summary.txt", "w"
-    ) as ostream:
+    with open(Path(config.save_dir) / config.run_id / "model_summary.txt", "w") as ostream:
         ostream.write(str(summary))
 
     ckpt_file = Path(config.save_dir) / config.run_id / "last_checkpoint.ckpt"
@@ -263,30 +104,25 @@ def train_model(config: TrainingConfig) -> float:
 
 
 def test_model(config: TrainingConfig) -> float:
-    pdm_factor = 8
-    config.seq_len = pdm_factor * config.seq_len
-    testing_dataset = SpeechCommandsDatasetSmall(
-        root=config.data_root,
-        download=True,
-        subset="validation",
-        data_encoding="pdm",
-        pdm_factor=pdm_factor
-    )
+    testing_dataset = DatasetRegistry.instantiate(config, split="testing")
     testing_loader = DataLoader(
         testing_dataset,
-        batch_size=config.batch_size,
-        shuffle=True,
+        batch_size=1,
+        shuffle=False,
         num_workers=_get_cpu_count_per_node(),
-        pin_memory=False
+        pin_memory=False,
     )
     trainer = Trainer(
         deterministic=True,
+        limit_test_batches=10,
         log_every_n_steps=100,
-        logger=CSVLogger(save_dir=Path(config.save_dir) / config.run_id, name="logs", version=f"test-{pdm_factor}"),
+        logger=CSVLogger(save_dir=Path(config.save_dir) / config.run_id, name="logs", version="test"),
     )
 
-    ssm = S4Network(config, output_dim=testing_dataset.num_labels)
-    ssm.update_sampling_rate(pdm_factor)
+    if config.task == "classification":
+        ssm = ClassificationModule(config, testing_dataset.num_labels)
+    else:
+        ssm = RegressionModule(config, output_dim=testing_dataset.num_labels)
 
     ckpt_file = Path(config.save_dir) / config.run_id / "best_checkpoint.ckpt"
 
@@ -334,11 +170,14 @@ def train() -> None:
     config = ConfigParser.from_cli_args()
     train_model(config=config)
 
+
 def test() -> None:
-    run_to_test = Path("/home/ludovic/workspace/ssm-speech-processing/training-runs/local/ssm-speech-processing/google_speech_commands/264405")
+    run_to_test = Path(
+        "/home/ludovic/workspace/ssm-speech-processing/training-runs/local/ssm-speech-processing/voicebank_demand/245514"
+    )
     config = TrainingConfig.from_json(run_to_test / "training_config.json")
     test_model(config)
 
 
 if __name__ == "__main__":
-    train()
+    test()
