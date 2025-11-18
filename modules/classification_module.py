@@ -25,6 +25,19 @@ class ClassificationModule(SequenceModule):
         out = self._forward_pass(batch, pool=True)
         loss = self._cross_entropy(out, batch[1])
         accuracy = self._accuracy(out, batch[1])
-        self.log(name=f"{subset}_loss", value=loss.item(), on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
-        self.log(name=f"{subset}_accuracy", value=accuracy.item(), on_step=False, on_epoch=True, sync_dist=True)
+        self.log(
+            name=f"{subset}_loss",
+            value=loss.item(),
+            on_step=subset == "test",
+            on_epoch=True,
+            sync_dist=True,
+            prog_bar=True,
+        )
+        self.log(
+            name=f"{subset}_accuracy",
+            value=accuracy.item(),
+            on_step=subset == "test",
+            on_epoch=True,
+            sync_dist=True,
+        )
         return loss

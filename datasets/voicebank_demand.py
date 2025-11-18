@@ -15,17 +15,15 @@ class VoiceBankDEMAND(SequenceDataset):
         self,
         root: str,
         data_encoding: str = "pcm",
-        pdm_factor: int = 64,
+        upsampling_factor: int = 1,
         subset: str = "training",
         speakers: int = 28,
     ) -> None:
-        super().__init__()
+        super().__init__(upsampling_factor, data_encoding)
         if speakers == 28:
             self._root = root + "/VoiceBankDemand_28spk"
         else:
             self._root = root + "/VoiceBankDemand_56spk"
-        self._encoding = data_encoding
-        self._pdm_factor = pdm_factor
         self._rng = default_rng(seed=3221)
 
         self._subset = subset

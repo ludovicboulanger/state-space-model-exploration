@@ -1,3 +1,6 @@
+from typing import Tuple
+from torch import Tensor, arange, diag, meshgrid, pi, sqrt, stack, where, zeros
+from torch.linalg import inv
 from torch.nn import Module, GELU, Sigmoid, ReLU, GLU, Tanh, Identity, LayerNorm, BatchNorm1d, GroupNorm
 
 from config import TrainingConfig
@@ -47,19 +50,19 @@ class DatasetRegistry:
         if config.dataset == "gcs-sm":
             return SpeechCommandsDatasetSmall(
                 root=config.data_root,
-                download=True,
+                download=False,
                 subset=split,
                 data_encoding=config.data_encoding,
-                pdm_factor=config.pdm_factor,
+                upsampling_factor=config.upsampling_factor,
             )
 
         elif config.dataset == "gcs":
             return SpeechCommandsDataset(
                 root=config.data_root,
-                download=True,
+                download=False,
                 subset=split,
                 data_encoding=config.data_encoding,
-                pdm_factor=config.pdm_factor,
+                upsampling_factor=config.upsampling_factor,
             )
         elif config.dataset == "voicebank-28":
             return VoiceBankDEMAND(
@@ -67,7 +70,7 @@ class DatasetRegistry:
                 subset=split,
                 speakers=28,
                 data_encoding=config.data_encoding,
-                pdm_factor=config.pdm_factor,
+                upsampling_factor=config.upsampling_factor,
             )
         elif config.dataset == "voicebank-56":
             return VoiceBankDEMAND(
@@ -75,7 +78,52 @@ class DatasetRegistry:
                 subset=split,
                 speakers=56,
                 data_encoding=config.data_encoding,
-                pdm_factor=config.pdm_factor,
+                upsampling_factor=config.upsampling_factor,
             )
         else:
             raise Exception(f"Unrecognized dataset id from config: {config.dataset}")
+
+
+class StateMatricesRegistry:
+    @staticmethod
+    def instantiate(mode: str, state_dim: int) -> Tuple[Tensor, Tensor]:
+        if mode == "s4":
+            """
+            This functions implements the HiPPO A matrix according to equation
+            (2) of S4 paper and the corresponding Theorem 2 of the HiPPO paper
+            """
+            q = arange(state_dim).double()
+            rows, cols = meshgrid(q, q, indexing="ij")
+            r = 2 * q + 1
+            M = -1 * (where(rows >= cols, r, 0) - diag(q))
+            T = sqrt(diag(r))
+            A = T @ M @ inv(T)
+            B = diag(T)
+            return A, B.unsqueeze(dim=-1)
+        elif mode == "lmu":
+            """
+            This function implements equation (2) of the LMU Paper up to the theta
+            normalization.
+            """
+            N = arange(state_dim).view(-1, 1)
+            R = 2 * N + 1
+
+            i, j = meshgrid(N.squeeze(), N.squeeze(), indexing="ij")
+            A = where(i < j, -1, (-1) ** (i - j + 1))
+            A = R * A
+            B = R * (-1) ** N
+            return A, B
+        elif mode == "fout":
+            freqs = arange(state_dim // 2)
+            d = stack([zeros(state_dim // 2), freqs], dim=-1).reshape(-1)[1:]
+            A = pi * (-diag(d, 1) + diag(d, -1))
+            B = zeros(state_dim)
+            B[0::2] = 2**0.5
+            B[0] = 1
+
+            # Subtract off rank correction - this corresponds to the other endpoint u(t-1) in this case
+            A = A - B.view(-1, 1) ** 2
+            B = B.view(-1, 1)
+            return A, B
+        else:
+            raise ValueError(f"Unrecognized state matrix mode : {mode}")

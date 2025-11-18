@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Dict, Tuple
 from numpy import array, ndarray
 from torch import Tensor
+from tqdm import tqdm
 
 from datasets.speech_commands_dataset import SpeechCommandsDataset
 
@@ -15,7 +16,7 @@ class SpeechCommandsDatasetSmall(SpeechCommandsDataset):
         download: bool = False,
         subset: str = "training",
         data_encoding: str = "pcm",
-        pdm_factor: int = 64,
+        upsampling_factor: int = 1,
     ) -> None:
         super(SpeechCommandsDatasetSmall, self).__init__(
             root=root,
@@ -23,10 +24,10 @@ class SpeechCommandsDatasetSmall(SpeechCommandsDataset):
             folder_in_archive=folder_in_archive,
             download=download,
             subset=subset,
+            data_encoding=data_encoding,
+            upsampling_factor=upsampling_factor,
         )
         self._indices = self._build_dataset()
-        self._data_encoding = data_encoding
-        self._pdm_factor = pdm_factor
 
     @property
     def label_to_id(self) -> Dict[str, int]:
@@ -44,14 +45,15 @@ class SpeechCommandsDatasetSmall(SpeechCommandsDataset):
         }
 
     def __getitem__(self, n: int) -> Tuple[Tensor, Tensor]:
-        return super()[self._indices[n]]
+        x, y = super().__getitem__(self._indices[n])
+        return x, y
 
     def __len__(self) -> int:
         return len(self._indices)
 
     def _build_dataset(self) -> ndarray:
         indicies = []
-        for i in range(len(self._dataset)):
+        for i in tqdm(range(len(self._dataset)), desc=f"Creating {self._subset.title()} Dataset"):
             _, _, label, _, _ = self._dataset[i]
             if label in self.label_to_id.keys():
                 indicies.append(i)

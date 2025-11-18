@@ -29,9 +29,11 @@ class TrainingConfig:
     weight_decay: float = 5e-2
     # Data Hyperparameters
     data_encoding: str = "pcm"
-    pdm_factor: int = 64
+    upsampling_factor: int = 1
     # NN Hyperparameters
-    unet: bool = False
+    encoder: str = "dense"
+    encoder_memory_size_seconds: float = 0.032
+    decimation_factor: int = 1
     num_ssms: int = 1
     num_layers: int = 4
     hidden_dim: int = 8
@@ -45,7 +47,7 @@ class TrainingConfig:
     norm: str = "batch"
     layer_activation: str = "gelu"
     final_activation: str = "glu"
-    seq_len: int = 16000
+    seq_len: int = 16000  # DEPRECATED
 
     def __getitem__(self, key: str) -> Union[str, float, int, bool]:
         return getattr(self, key)
@@ -142,15 +144,22 @@ class ConfigParser:
             help="The encoding to use for the speech data. Can be either PDM or PCM",
         )
         group.add_argument(
-            "--pdm_factor",
-            help='If data_encoding = "pdm", the factor to use for upsampling',
+            "--upsampling_factor",
+            help="The factor to use for upsampling the data.",
         )
 
         group = parser.add_argument_group(title="Neural Network Training Parameters")
         group.add_argument(
-            "--unet",
-            action="store_true",
-            help="Whether to use a U-Net like architecture.",
+            "--encoder",
+            help="The encoder to use. Can be dense, s4 or lmu.",
+        )
+        group.add_argument(
+            "--encoder_memory_size_seconds",
+            help="The memory size of the encoder. Only valid for lmu and s4 encoders",
+        )
+        group.add_argument(
+            "--decimation_factor",
+            help="The decimation to apply to the signal after the first SSM.",
         )
         group.add_argument(
             "--num_ssms",
@@ -204,7 +213,7 @@ class ConfigParser:
             "--final_activation",
             help="Activation applied at the S4 block output",
         )
-        group.add_argument("--seq_len", help="The expected sequence length as input")
+        group.add_argument("--seq_len", help="DEPRECATED : The expected sequence length as input")
         return ConfigParser._resolve_args(parser.parse_args())
 
     @staticmethod

@@ -25,4 +25,7 @@ rsync \
   --exclude "training-runs" \
   --exclude "official" \
   --exclude "s4_tests.py" \
+  --exclude "extensions/kernels/build" \
+  --exclude "extensions/kernels/dist" \
+  --exclude "extensions/kernels/structured_kernels.egg-info" \
   -avz -e "ssh -i $keyfile" $SCRIPT_PATH $username@$remotename:$destination

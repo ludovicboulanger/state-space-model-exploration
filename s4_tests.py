@@ -1,5 +1,5 @@
 from torch import allclose, rand, view_as_complex
-from models.s4 import S4Kernel, S4
+from models.s4 import S4Block, S4Kernel, S4
 from official.models.s4.s4 import FFTConv, SSMKernelDPLR
 
 
@@ -159,6 +159,57 @@ def test_bench_layer() -> None:
     print("-----------------------------------------------------------------")
 
 
+def test_output_state() -> None:
+    channels = 1
+    state_dim = 32
+    n_ssms = 1
+    min_dt = 1e-4
+    max_dt = 1e-1
+    seq_len = 16000
+
+    s4 = S4(
+        channels=channels,
+        n_ssms=n_ssms,
+        state_dim=state_dim,
+        seq_len=seq_len,
+        min_dt=min_dt,
+        max_dt=max_dt,
+        output_state=True,
+    )
+    s4.to("cuda")
+
+    test_input = rand(size=(3, seq_len, channels)).to("cuda")
+
+    y = s4(test_input)
+    print(y.shape)
+
+
+def test_legt() -> None:
+    channels = 1
+    state_dim = 32
+    n_ssms = 1
+    min_dt = 1e-4
+    max_dt = 1e-1
+    seq_len = 16000
+
+    s4 = S4(
+        channels=channels,
+        n_ssms=n_ssms,
+        state_dim=state_dim,
+        seq_len=seq_len,
+        min_dt=min_dt,
+        max_dt=max_dt,
+        mode="legt",
+        output_state=True,
+    )
+    s4.to("cuda")
+
+    test_input = rand(size=(3, seq_len, channels)).to("cuda")
+
+    y = s4(test_input)
+    print(y.shape)
+
+
 def check_close(a, b):
     abs_err = (a - b).abs()
     rel_err = abs_err / (b.abs() + 1e-12)
@@ -175,5 +226,6 @@ if __name__ == "__main__":
     set_random_seed(3221)
     set_np_seed(3221)
 
-    test_bench_kernel()
-    test_bench_layer()
+    test_legt()
+    # test_bench_kernel()
+    # test_bench_layer()

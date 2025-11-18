@@ -5,7 +5,7 @@ from torch.nn.functional import pad
 from torchaudio.datasets import SPEECHCOMMANDS
 
 from datasets.sequence_dataset import SequenceDataset
-from utils.encoders import PDMEncoder
+from utils.encoders import PDMEncoder, Upsampler
 
 
 class SpeechCommandsDataset(SequenceDataset):
@@ -17,13 +17,11 @@ class SpeechCommandsDataset(SequenceDataset):
         download: bool = False,
         subset: str = "training",
         data_encoding: str = "pcm",
-        pdm_factor: int = 64,
+        upsampling_factor: int = 1,
     ) -> None:
-        super(SpeechCommandsDataset, self).__init__()
+        super(SpeechCommandsDataset, self).__init__(upsampling_factor, data_encoding)
         self._dataset = SPEECHCOMMANDS(root, url, folder_in_archive, download, subset)
         self._subset = subset
-        self._data_encoding = data_encoding
-        self._pdm_factor = pdm_factor
 
     @property
     def label_to_id(self) -> Dict[str, int]:
@@ -79,8 +77,10 @@ class SpeechCommandsDataset(SequenceDataset):
         data = self._pad_data_if_needed(data)
 
         if self._data_encoding == "pdm":
-            data = PDMEncoder(pdm_factor=self._pdm_factor)(data)
+            data = PDMEncoder(pdm_factor=self._upsampling_factor)(data)
             data = 2 * data - 1
+        elif self._upsampling_factor > 1:
+            data = Upsampler(self._upsampling_factor, orig_freq=16_000)(data)
 
         return data.transpose(dim0=-1, dim1=-2), label_as_tensor
 

@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import Dict, Optional, Tuple
 from einops import rearrange
 
@@ -22,6 +23,7 @@ from torch import (
     mean,
     meshgrid,
     no_grad,
+    ones,
     pi,
     rand,
     randn,
@@ -39,8 +41,8 @@ from torch.nn.functional import softplus
 from torch.linalg import inv, eigh, solve, matrix_power
 from torch.nn import Module, Parameter
 
+from extensions.kernels.cauchy import cauchy_mult
 from utils.registries import ActivationRegistry, NormRegistry
-from utils.computations import cauchy_mult
 
 
 class S4Block(Module):
@@ -50,7 +52,6 @@ class S4Block(Module):
         out_channels: int,
         n_ssms: int,
         state_dim: int,
-        seq_len: int,
         min_dt: float,
         max_dt: float,
         tie_dt: bool = True,
@@ -63,13 +64,13 @@ class S4Block(Module):
         prenorm: bool = True,
         layer_activation: str = "none",
         final_activation: str = "none",
+        requires_grad: bool = True,
     ) -> None:
         super().__init__()
         self._s4_layer = S4(
             in_channels,
             n_ssms,
             state_dim,
-            seq_len,
             min_dt,
             max_dt,
             tie_dt,
@@ -77,6 +78,7 @@ class S4Block(Module):
             residual,
             dtype,
             p_kernel_dropout,
+            requires_grad,
         )
         if p_block_dropout > 0.0:
             self._block_dropout = Dropout(p_block_dropout)
@@ -103,12 +105,8 @@ class S4Block(Module):
             self._residual_connection = Identity()
 
     @property
-    def seq_len(self) -> int:
-        return self._s4_layer.seq_len
-
-    @seq_len.setter
-    def seq_len(self, seq_len: int) -> None:
-        self._s4_layer.seq_len = seq_len
+    def kernel(self) -> S4Kernel:
+        return self._s4_layer.kernel
 
     def forward(self, u: Tensor) -> Tuple[Tensor, Tensor]:
         if self._prenorm:
@@ -144,7 +142,6 @@ class S4(Module):
         channels: int,
         n_ssms: int,
         state_dim: int,
-        seq_len: int,
         min_dt: float,
         max_dt: float,
         tie_dt: bool = True,
@@ -152,51 +149,50 @@ class S4(Module):
         use_D: bool = True,
         dtype: TorchType = float32,
         p_kernel_dropout: float = 0.0,
+        requires_grad: bool = True,
+        output_state: bool = False,
     ) -> None:
         super(S4, self).__init__()
         self._kernel = S4Kernel(
             channels,
             n_ssms,
             state_dim,
-            seq_len,
             min_dt,
             max_dt,
             tie_dt,
             clip_B,
             dtype,
+            requires_grad,
+            output_state,
         )
-        self._seq_len = seq_len
+        self._use_D = use_D and not output_state
         if use_D:
             self._D = Parameter(data=randn(size=(channels,)), requires_grad=True)
-        else:
-            self._D = Parameter(data=zeros(size=(channels,)), requires_grad=False)
         self._kernel_dropout = Dropout(p=p_kernel_dropout) if p_kernel_dropout > 0.0 else Identity()
 
     @property
-    def seq_len(self) -> int:
-        return self._kernel.seq_len
-
-    @seq_len.setter
-    def seq_len(self, seq_len: int) -> None:
-        self._seq_len = seq_len
-        self._kernel.seq_len = seq_len
+    def kernel(self) -> S4Kernel:
+        return self._kernel
 
     def forward(self, u: Tensor) -> Tensor:
-        y = self._kernel_forward_pass(u).reshape(u.shape)
-        y = y + einsum("blh,h->blh", u, self._D)
+        y = self._kernel_forward_pass(u)
+        if self._use_D:
+            y = y + einsum("blh,h->blh", u, self._D)
         return y
 
     def _kernel_forward_pass(self, u: Tensor) -> Tensor:
+        seq_len = u.shape[1]
         u = u.transpose(-1, -2)
-        kernel = self._kernel()
+        kernel = self._kernel(seq_len)
         kernel = self._kernel_dropout(kernel)
 
-        k_fft = rfft(kernel, n=2 * self._seq_len)
-        u_fft = rfft(u, n=2 * self._seq_len)
+        k_fft = rfft(kernel, n=2 * seq_len)
+        u_fft = rfft(u, n=2 * seq_len)
         y_fft = einsum("bhl,chl->bchl", u_fft, k_fft)
 
-        y = irfft(y_fft, n=2 * self._seq_len)[..., : self._seq_len]
-        return y.transpose(-1, -2)
+        y = irfft(y_fft, n=2 * seq_len)[..., :seq_len]
+        batch, channels, hidden, time = y.shape
+        return y.view(batch, channels * hidden, time).transpose(-1, -2)
 
 
 class S4Kernel(Module):
@@ -205,12 +201,13 @@ class S4Kernel(Module):
         channels: int,
         n_ssms: int,
         state_dim: int,
-        seq_len: int,
         min_dt: float,
         max_dt: float,
         tie_dt: bool = True,
         clip_B: Optional[float] = 2.0,
         dtype: TorchType = float32,
+        requires_grad: bool = True,
+        output_state: bool = False,
     ) -> None:
         super(S4Kernel, self).__init__()
         self._channels = channels
@@ -222,30 +219,22 @@ class S4Kernel(Module):
             f"Error: n_ssms does not divide channels. n_ssms = {self._n_ssms} ; channels = {self._channels}"
         )
         self._state_dim = state_dim
-        self._seq_len = seq_len
         self._min_dt = min_dt
         self._max_dt = max_dt
         self._tie_dt = tie_dt
         self._clip_B = clip_B
         self._dtype = dtype
+        self._output_state = output_state
 
-        dt = Parameter(data=self._init_dt(), requires_grad=True)
+        dt = self._init_dt()
         A, P, B, _ = self._init_dplr_parameters()
         C = self._init_C_matrix()
         # TODO: Look at official register_params in SSMKernelDiag for reference
-        self._register_parameters(A, P, B, C, dt)
+        self._register_parameters(A, P, B, C, dt, requires_grad)
 
         # Assume Conjugate symmetry in the parameters
         self._state_dim = self._state_dim // 2
         self._scale_factor = 1.0
-
-    @property
-    def seq_len(self) -> int:
-        return self._seq_len
-
-    @seq_len.setter
-    def seq_len(self, seq_len: int) -> None:
-        self._seq_len = seq_len
 
     @property
     def scale_factor(self) -> float:
@@ -255,35 +244,39 @@ class S4Kernel(Module):
     def scale_factor(self, scale_factor: float) -> None:
         self._scale_factor = scale_factor
 
-    def forward(self) -> Tensor:
+    def forward(self, seq_len: int) -> Tensor:
         """
         Compute the S4 Kernel using the Bilinear Transform to discretize parameters. This function
         implements the Appendix C.2 and C.3
         """
-        C_t = self._compute_C_tilde()
         A, B, _, P, Q, dt = self._get_parameters()
-        omega = exp(-2j * pi * arange(self._seq_len // 2 + 1) / self._seq_len).to(A)
+        omega = exp(-2j * pi * arange(seq_len // 2 + 1) / seq_len).to(A)
         z = 2 * (1 - omega) / (1 + omega)
 
         A = A * dt
         B = concatenate((B, P), dim=-3)
+        if self._output_state:
+            # replace the C_tilde with H identity matrices
+            # Will return a Tensor of shape (N, H, T) instead of (1, H, T)
+            C_t = eye(self._state_dim).to(A).unsqueeze(1).expand(-1, self._channels, -1)
+        else:
+            C_t = self._compute_C_tilde(seq_len)
         C = concatenate((C_t, Q), dim=-3)
         v = B.unsqueeze(dim=-3) * C.unsqueeze(dim=-4)
         v = v * dt
 
         r = cauchy_mult(v, z, A)
         K = r[:-1, :-1, :, :] - r[:-1, -1:, :, :] * r[-1:, :-1, :, :] / (1 + r[-1:, -1:, :, :])
-        K = K * 2 / (1 + omega)
-        kernel = irfft(K, n=self._seq_len)
+        kernel = irfft(K, n=seq_len)
 
         return kernel[-1, :, :, :]
 
     @no_grad()
-    def _compute_C_tilde(self) -> Tensor:
+    def _compute_C_tilde(self, seq_len: int) -> Tensor:
         C = view_as_complex(self._C)
         A_bar, _ = self._discretize_A_and_B()
         # Note: Official Implementation uses their own function
-        dA_L = matrix_power(A_bar, self._seq_len)
+        dA_L = matrix_power(A_bar, seq_len)
 
         C_t = concatenate((C, C.conj_physical()), dim=-1)
         prod = einsum("hmn,chn -> chm", dA_L.transpose(-1, -2), C_t)
@@ -375,7 +368,7 @@ class S4Kernel(Module):
 
     def _init_dplr_parameters(self) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         A, B = self._build_hippo_legs()
-        P = self._build_lowrank_correction_term()
+        P = self._build_legs_lowrank_correction_term()
         A, B, P = A.float(), B.float(), P.float()
 
         # Add the lowrank. A = VΛV^-1 - PQ^*
@@ -430,25 +423,28 @@ class S4Kernel(Module):
         else:
             # Assume conjugate symmetry in state so only consider the first half
             shape = (self._channels, self._state_dim // 2)
-        # Log initialize dt in the same way as in How to Train Your HiPPO
-        inv_dt = rand(size=shape, dtype=self._dtype)
-        inv_dt = (nplog(self._max_dt) - nplog(self._min_dt)) * inv_dt
-        inv_dt += nplog(self._min_dt)
+        if self._min_dt == self._max_dt:
+            inv_dt = self._min_dt * ones(size=shape, dtype=self._dtype)
+        else:
+            # Log initialize dt in the same way as in How to Train Your HiPPO
+            inv_dt = rand(size=shape, dtype=self._dtype)
+            inv_dt = (nplog(self._max_dt) - nplog(self._min_dt)) * inv_dt
+            inv_dt += nplog(self._min_dt)
         # Inverse Softplus initialize like in the official codebase
         inv_dt = log(exp(clamp_min(exp(inv_dt), min=1e-4)) - 1)
         return inv_dt
 
-    def _register_parameters(self, A: Tensor, P: Tensor, B: Tensor, C: Tensor, dt: Tensor) -> None:
+    def _register_parameters(self, A: Tensor, P: Tensor, B: Tensor, C: Tensor, dt: Tensor, requires_grad: bool) -> None:
         # Check that diagonal part has negative real and imag part
         # (allow some tolerance for numerical precision on real part
         # since it may be constructed by a diagonalization)
         assert all(A.real < 1e-4) and all(A.imag <= 0.0)
 
         # The transformations on the A parameter and dt parameter come from the official repo
-        self._A_real = Parameter(data=log(clamp_min(-1 * A.real, min=1e-4)), requires_grad=True)
-        self._A_imag = Parameter(data=clamp_min(-1 * A.imag, min=1e-4), requires_grad=True)
-        self._P = Parameter(data=view_as_real(P), requires_grad=True)
-        self._B = Parameter(data=view_as_real(B), requires_grad=True)
+        self._A_real = Parameter(data=log(clamp_min(-1 * A.real, min=1e-4)), requires_grad=requires_grad)
+        self._A_imag = Parameter(data=clamp_min(-1 * A.imag, min=1e-4), requires_grad=requires_grad)
+        self._P = Parameter(data=view_as_real(P), requires_grad=requires_grad)
+        self._B = Parameter(data=view_as_real(B), requires_grad=requires_grad)
         self._C = Parameter(data=view_as_real(C.conj_physical()), requires_grad=True)
         self._dt = Parameter(data=dt, requires_grad=True)
 
@@ -473,7 +469,7 @@ class S4Kernel(Module):
         paper and the corresponding Theorem 2 of the HiPPO paper
         """
         q = arange(self._state_dim).double()
-        rows, cols = meshgrid(q, q)
+        rows, cols = meshgrid(q, q, indexing="ij")
         r = 2 * q + 1
         M = -1 * (where(rows >= cols, r, 0) - diag(q))
         T = sqrt(diag(r))
@@ -481,7 +477,7 @@ class S4Kernel(Module):
         B = diag(T)
         return A, B
 
-    def _build_lowrank_correction_term(self) -> Tensor:
+    def _build_legs_lowrank_correction_term(self) -> Tensor:
         """
         Implements the NPLR correction term according to Appendix C.1 in the S4 paper.
         More precisely, this implements the LegS correction term.

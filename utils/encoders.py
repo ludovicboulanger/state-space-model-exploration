@@ -1,4 +1,5 @@
-from torch import cumsum, Tensor, zeros, zeros_like
+from torch import arange, cumsum, Tensor, zeros, zeros_like
+from torch.nn import Module
 from torch.nn.functional import pad
 from torchaudio.transforms import Resample
 
@@ -48,3 +49,35 @@ class Upsampler:
 
     def __call__(self, waveform: Tensor) -> Tensor:
         return self._upsampler(waveform)
+
+
+class Decimator(Module):
+    def __init__(self, fs: int, decimation_factor: int, antialias: bool = True) -> None:
+        super().__init__()
+        self._decimation_factor = decimation_factor
+        self._antialias = antialias
+        if antialias:
+            self._resample = Resample(orig_freq=fs, new_freq=fs // decimation_factor)
+
+    def update_sequence_params(self, fs: int, decimation_factor: int) -> None:
+        self._decimation_factor = decimation_factor
+        if self._antialias:
+            self._resample = Resample(orig_freq=fs, new_freq=fs // decimation_factor)
+
+    def forward(self, x: Tensor) -> Tensor:
+        if self._decimation_factor == 1:
+            return x
+        if not self._antialias:
+            samples = arange(0, x.shape[1], step=self._decimation_factor).long()
+            return x[:, samples, :]
+        else:
+            return self._resample(x.transpose(-1, -2)).transpose(-1, -2)
+
+
+class LegendreProjection(Module):
+    def __init__(self, seq_len: int, decimation_factor: int) -> None:
+        super().__init__()
+        self._eval_points = arange(-1, -1, seq_len // decimation_factor)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return x
